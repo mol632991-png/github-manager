@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  fetchAllData, fetchRecentActivity, parseProfileUrl, CATEGORY_LIST, fetchReadmeSnippet,
+  fetchAllData, fetchRecentActivity, parseProfileUrl, CATEGORY_LIST, SCENARIO_LIST, fetchReadmeSnippet,
 } from './utils/github';
 import {
   saveData, getAllData, getConfig, setConfig,
@@ -45,8 +45,10 @@ function App() {
 
   const [filterType, setFilterType] = useState('all');      // all / owned / starred
   const [filterCategory, setFilterCategory] = useState('all');
+  const [filterScenario, setFilterScenario] = useState('all');
   const [filterLang, setFilterLang] = useState('all');
   const [sortBy, setSortBy] = useState('updated');
+  const [sideTab, setSideTab] = useState('category'); // category / scenario
 
   /* -------------- init -------------- */
   useEffect(() => {
@@ -170,15 +172,22 @@ function App() {
     return CATEGORY_LIST.filter((c) => m.has(c)).map((c) => ({ name: c, count: m.get(c) }));
   }, [projects]);
 
+  const scenarioStats = useMemo(() => {
+    const m = new Map();
+    projects.forEach((p) => m.set(p.scenario, (m.get(p.scenario) || 0) + 1));
+    return SCENARIO_LIST.filter((c) => m.has(c)).map((c) => ({ name: c, count: m.get(c) }));
+  }, [projects]);
+
   const processed = useMemo(() => {
     const term = searchTerm.toLowerCase().trim();
     const list = projects.filter((p) => {
       if (filterType === 'owned' && !p.isOwner) return false;
       if (filterType === 'starred' && p.isOwner) return false;
       if (filterCategory !== 'all' && p.category !== filterCategory) return false;
+      if (filterScenario !== 'all' && p.scenario !== filterScenario) return false;
       if (filterLang !== 'all' && p.language !== filterLang) return false;
       if (term) {
-        const blob = `${p.name} ${p.owner} ${p.description} ${p.problemSolved} ${p.topics.join(' ')}`.toLowerCase();
+        const blob = `${p.name} ${p.owner} ${p.description} ${p.problemSolved} ${p.scenario} ${p.topics.join(' ')}`.toLowerCase();
         if (!blob.includes(term)) return false;
       }
       return true;
@@ -189,7 +198,7 @@ function App() {
       return new Date(b.updatedAt) - new Date(a.updatedAt);
     });
     return list;
-  }, [projects, searchTerm, filterType, filterCategory, filterLang, sortBy]);
+  }, [projects, searchTerm, filterType, filterCategory, filterScenario, filterLang, sortBy]);
 
   const ownedCount = projects.filter((p) => p.isOwner).length;
   const starredCount = projects.length - ownedCount;
@@ -285,30 +294,65 @@ function App() {
         </nav>
 
         <div style={{ marginTop: '0.5rem' }}>
-          <div className="side-sub-title">分类概览</div>
-          {categoryStats.length === 0 && (
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', padding: '0.3rem 0.5rem' }}>
-              同步后将在此显示
-            </div>
+          <div className="side-tabs">
+            <button
+              className={`side-tab ${sideTab === 'category' ? 'active' : ''}`}
+              onClick={() => setSideTab('category')}
+            >按用途</button>
+            <button
+              className={`side-tab ${sideTab === 'scenario' ? 'active' : ''}`}
+              onClick={() => setSideTab('scenario')}
+            >按场景</button>
+          </div>
+
+          {sideTab === 'category' ? (
+            <>
+              {categoryStats.length === 0 && (
+                <div className="side-empty">同步后将在此显示</div>
+              )}
+              {categoryStats.map((c) => {
+                const Icon = CATEGORY_ICONS[c.name] || Grid;
+                const active = filterCategory === c.name && currentView === 'dashboard';
+                return (
+                  <div
+                    key={c.name}
+                    className={`cat-item ${active ? 'active' : ''}`}
+                    onClick={() => {
+                      setFilterCategory(active ? 'all' : c.name);
+                      setCurrentView('dashboard');
+                    }}
+                  >
+                    <Icon size={15} />
+                    <span className="cat-name">{c.name}</span>
+                    <span className="cat-count">{c.count}</span>
+                  </div>
+                );
+              })}
+            </>
+          ) : (
+            <>
+              {scenarioStats.length === 0 && (
+                <div className="side-empty">同步后将在此显示</div>
+              )}
+              {scenarioStats.map((s) => {
+                const active = filterScenario === s.name && currentView === 'dashboard';
+                return (
+                  <div
+                    key={s.name}
+                    className={`cat-item ${active ? 'active' : ''}`}
+                    onClick={() => {
+                      setFilterScenario(active ? 'all' : s.name);
+                      setCurrentView('dashboard');
+                    }}
+                  >
+                    <Sparkles size={15} />
+                    <span className="cat-name">{s.name}</span>
+                    <span className="cat-count">{s.count}</span>
+                  </div>
+                );
+              })}
+            </>
           )}
-          {categoryStats.map((c) => {
-            const Icon = CATEGORY_ICONS[c.name] || Grid;
-            const active = filterCategory === c.name && currentView === 'dashboard';
-            return (
-              <div
-                key={c.name}
-                className={`cat-item ${active ? 'active' : ''}`}
-                onClick={() => {
-                  setFilterCategory(active ? 'all' : c.name);
-                  setCurrentView('dashboard');
-                }}
-              >
-                <Icon size={15} />
-                <span className="cat-name">{c.name}</span>
-                <span className="cat-count">{c.count}</span>
-              </div>
-            );
-          })}
         </div>
 
         <div className="sync-status">
@@ -377,9 +421,16 @@ function App() {
               </select>
 
               <select className="filter-select" value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)}>
-                <option value="all">所有分类</option>
+                <option value="all">所有用途</option>
                 {CATEGORY_LIST.filter((c) => projects.some((p) => p.category === c)).map((c) => (
                   <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+
+              <select className="filter-select" value={filterScenario} onChange={(e) => setFilterScenario(e.target.value)}>
+                <option value="all">所有场景</option>
+                {SCENARIO_LIST.filter((s) => projects.some((p) => p.scenario === s)).map((s) => (
+                  <option key={s} value={s}>{s}</option>
                 ))}
               </select>
 
@@ -533,6 +584,11 @@ const ProjectCard = ({ project, index, onOpen }) => {
         <span className="badge badge-category">
           <Icon size={12} /> {project.category}
         </span>
+        {project.scenario && project.scenario !== '其他场景' && (
+          <span className="badge badge-scenario">
+            <Sparkles size={12} /> {project.scenario}
+          </span>
+        )}
         {project.language && <span className="badge badge-language">{project.language}</span>}
         <span className="badge badge-plain"><Star size={12} /> {project.stars}</span>
       </div>
@@ -570,6 +626,13 @@ const ProjectDetail = ({ project, readme, onClose }) => (
         <span><Code size={16} color="#10b981" /> {project.language}</span>
         <span><Calendar size={16} color="var(--accent-primary)" /> {new Date(project.updatedAt).toLocaleDateString()}</span>
         {project.license && <span className="badge badge-plain">{project.license}</span>}
+      </div>
+
+      <div className="detail-tags">
+        <span className="badge badge-category"><Grid size={12} /> 用途：{project.category}</span>
+        {project.scenario && (
+          <span className="badge badge-scenario"><Sparkles size={12} /> 场景：{project.scenario}</span>
+        )}
       </div>
 
       <section className="detail-section">

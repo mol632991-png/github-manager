@@ -24,7 +24,8 @@ const patched = src.replace(
 const dataUrl = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(patched);
 const mod = await import(dataUrl);
 const {
-  parseProfileUrl, detectCategory, normalizeProject, CATEGORY_LIST,
+  parseProfileUrl, detectCategory, detectScenario, normalizeProject,
+  CATEGORY_LIST, SCENARIO_LIST,
 } = mod;
 
 /* ----------------------------- 断言工具 ----------------------------- */
@@ -113,6 +114,43 @@ t('usage 随语言变化', () => truthy(p2.usage.includes('Go') || p2.usage.incl
 console.log('\n[5] CATEGORY_LIST 覆盖所有分类');
 for (const [, expected] of cases) includes(CATEGORY_LIST, expected);
 t('CATEGORY_LIST 含 10 类', () => eq(CATEGORY_LIST.length, 10));
+
+console.log('\n[6] detectScenario 场景识别');
+const scenarioCases = [
+  [{ name: 'quant-trading', description: 'A quant trading backtest framework', topics: ['quant', 'trading'] }, '金融投资'],
+  [{ name: 'my-mcp-server', description: 'An MCP server for Cursor', topics: ['mcp'] }, 'AI 技能与插件'],
+  [{ name: 'langchain', description: 'Build LLM apps', topics: ['llm'] }, '大模型开发'],
+  [{ name: 'pixel-adventure', description: 'A roguelike pixel game', topics: ['game', 'roguelike'] }, '游戏娱乐'],
+  [{ name: 'netease-cloud', description: 'Netease music downloader', topics: ['music'] }, '音乐与音频'],
+  [{ name: 'comfyui-ext', description: 'ComfyUI extension for image processing', topics: ['image'] }, '图像与视频'],
+  [{ name: 'novel-writer', description: 'A novel writing tool', topics: ['writing'] }, '写作与小说'],
+  [{ name: 'todo-pro', description: 'A productivity todo manager', topics: ['productivity'] }, '办公与效率'],
+  [{ name: 'algo-notes', description: 'Leetcode interview algorithm notes', topics: ['interview', 'algorithm'] }, '学习与教育'],
+  [{ name: 'bi-dashboard', description: 'Business intelligence dashboard', topics: ['analytics', 'dashboard'] }, '数据分析'],
+  [{ name: 'my-vpn', description: 'A simple VPN proxy', topics: ['vpn'] }, '安全与隐私'],
+  [{ name: 'web-crawler', description: 'A scrapy-based crawler', topics: ['crawler'] }, '网络与爬虫'],
+  [{ name: 'home-assist', description: 'Smart home automation scripts', topics: ['home-automation'] }, '生活工具'],
+  [{ name: 'vscode-helper', description: 'A VS Code extension for formatters', topics: ['vscode'] }, '开发者辅助'],
+  [{ name: 'misc-thing', description: 'misc stuff', topics: [] }, '其他场景'],
+];
+for (const [raw, expected] of scenarioCases) {
+  t(`${raw.name} -> ${expected}`, () => eq(detectScenario(raw), expected));
+}
+t('SCENARIO_LIST 含 15 项', () => eq(SCENARIO_LIST.length, 15));
+for (const [, expected] of scenarioCases) includes(SCENARIO_LIST, expected);
+
+console.log('\n[7] normalizeProject 同时输出 category + scenario');
+const p3 = normalizeProject({
+  id: 7, name: 'my-mcp-server', full_name: 'me/my-mcp-server',
+  owner: { login: 'me' }, description: 'An MCP server for Cursor',
+  html_url: '', language: 'TypeScript',
+  stargazers_count: 12, forks_count: 0, topics: ['mcp', 'cursor'],
+  updated_at: '2026-05-10T00:00:00Z', pushed_at: '2026-05-10T00:00:00Z',
+  __isOwner: true,
+});
+t('category = AI 与大模型', () => eq(p3.category, 'AI 与大模型'));
+t('scenario = AI 技能与插件', () => eq(p3.scenario, 'AI 技能与插件'));
+t('helpsWith 含场景价值', () => truthy(p3.helpsWith.some((h) => h.includes('Cursor') || h.includes('Claude') || h.includes('插件') || h.includes('扩展'))));
 
 console.log(`\n===================================`);
 console.log(`通过 ${pass} 项，失败 ${fail} 项`);

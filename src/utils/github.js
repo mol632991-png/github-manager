@@ -189,7 +189,8 @@ export const fetchReadmeSnippet = async (fullName, token) => {
 
 function normalizeProject(raw) {
   const category = detectCategory(raw);
-  const { problemSolved, usage, helpsWith } = generateGuide(raw, category);
+  const scenario = detectScenario(raw);
+  const { problemSolved, usage, helpsWith } = generateGuide(raw, category, scenario);
   return {
     id: raw.id,
     name: raw.name,
@@ -212,6 +213,7 @@ function normalizeProject(raw) {
     license: raw.license?.spdx_id || raw.license?.name || '',
     homepage: raw.homepage || '',
     category,
+    scenario,
     problemSolved,
     usage,
     helpsWith,
@@ -308,24 +310,156 @@ export function detectCategory(raw) {
   return '其他实用项目';
 }
 
+/* --------------------------- 使用场景分类 ----------------------------- */
+
+// 第二维度：按「项目给你解决了什么场景的问题」来归纳，便于从生活/工作视角查找。
+// 注：一个项目的 category（技术用途）和 scenario（使用场景）是正交的。
+// 例如 LangChain：category = AI 与大模型，scenario = 大模型开发。
+export const SCENARIO_LIST = [
+  '金融投资',
+  'AI 技能与插件',
+  '大模型开发',
+  '游戏娱乐',
+  '音乐与音频',
+  '图像与视频',
+  '写作与小说',
+  '办公与效率',
+  '学习与教育',
+  '数据分析',
+  '安全与隐私',
+  '网络与爬虫',
+  '生活工具',
+  '开发者辅助',
+  '其他场景',
+];
+
+// 场景关键词表：key = 场景名，value = 小写关键词集合（name/desc/topic 全量匹配）
+// 每条规则都尽量具体，先命中的规则即返回。
+const SCENARIO_RULES = [
+  ['金融投资', {
+    topics: ['finance', 'fintech', 'trading', 'quant', 'stock', 'crypto', 'blockchain', 'bitcoin', 'ethereum', 'defi'],
+    keywords: ['quant', 'trading', 'finance', 'fintech', 'stock', 'stocks', 'crypto', 'bitcoin', 'ethereum',
+               'blockchain', 'defi', 'wallet', 'exchange', 'backtest',
+               '量化', '交易', '股票', '基金', '金融', '区块链', '加密货币', '钱包', '理财'],
+  }],
+  ['AI 技能与插件', {
+    topics: ['mcp', 'copilot', 'cursor-rules', 'cursor', 'windsurf', 'claude-desktop', 'chatgpt-plugin', 'raycast', 'obsidian-plugin'],
+    keywords: ['mcp-server', 'mcp_server', 'mcp server', 'skill', 'skills', 'cursor rules', 'cursorrules',
+               'copilot', 'chatgpt plugin', 'claude skill', 'raycast extension', 'obsidian plugin',
+               '智能体技能', '插件', '技能包'],
+  }],
+  ['大模型开发', {
+    topics: ['llm', 'gpt', 'openai', 'anthropic', 'claude', 'langchain', 'llamaindex', 'rag', 'agent',
+             'embedding', 'vector-database', 'pytorch', 'tensorflow', 'transformers', 'fine-tuning'],
+    keywords: ['llm', 'langchain', 'llamaindex', 'rag ', 'retrieval', 'embedding', 'fine-tune',
+               'fine tuning', 'transformer', 'stable diffusion', 'diffusion model',
+               'train model', 'pre-trained', 'foundation model',
+               '大模型', '微调', '预训练', '模型训练', '向量数据库'],
+  }],
+  ['游戏娱乐', {
+    topics: ['game', 'games', 'gamedev', 'unity', 'godot', 'unreal', 'pygame', 'minecraft', 'roguelike', 'emulator'],
+    keywords: ['game engine', 'game-engine', 'roguelike', 'emulator', 'minecraft', 'pixel art',
+               '游戏', '模拟器', '像素'],
+  }],
+  ['音乐与音频', {
+    topics: ['music', 'audio', 'tts', 'speech', 'voice', 'midi', 'daw', 'podcast', 'spotify', 'netease'],
+    keywords: ['music', 'audio ', 'tts', 'speech synthesis', 'voice clone', 'midi', 'daw', 'podcast',
+               'sound effect', 'waveform',
+               '音乐', '音频', '语音', '配音', '歌曲', '播客'],
+  }],
+  ['图像与视频', {
+    topics: ['image', 'video', 'computer-vision', 'image-processing', 'video-editing', 'photo', 'stable-diffusion',
+             'comfyui', 'ocr'],
+    keywords: ['image processing', 'video editing', 'photo', 'photograph', 'comfyui',
+               'stable diffusion', 'computer vision', 'object detection', 'face recognition', 'ocr',
+               '图像', '视频', '视觉', '抠图', '剪辑', '识别'],
+  }],
+  ['写作与小说', {
+    topics: ['writing', 'novel', 'blog', 'markdown', 'cms', 'publishing', 'ebook', 'notetaking'],
+    keywords: ['novel', 'writing', 'blog engine', 'cms ', 'static site generator', 'markdown editor',
+               'note taking', 'note-taking', 'obsidian',
+               '小说', '写作', '笔记', '博客', '公众号', '文章'],
+  }],
+  ['办公与效率', {
+    topics: ['productivity', 'office', 'document', 'pdf', 'excel', 'word', 'spreadsheet', 'workflow', 'automation'],
+    keywords: ['productivity', 'pdf ', 'excel ', 'spreadsheet', 'word document', 'workflow',
+               'task manager', 'todo', 'calendar', 'meeting',
+               '办公', '效率', '表格', '日程', '会议', '文档', '待办'],
+  }],
+  ['学习与教育', {
+    topics: ['education', 'learning', 'tutorial', 'course', 'roadmap', 'interview', 'algorithm', 'leetcode',
+             'cheatsheet', 'awesome'],
+    keywords: ['tutorial', 'course', 'roadmap', 'interview', 'cheatsheet', 'learn ', 'learning resources',
+               'awesome ', 'curriculum', 'textbook', 'algorithm',
+               '教程', '学习', '面试', '课程', '算法题', '题解', '学习路线'],
+  }],
+  ['数据分析', {
+    topics: ['data-science', 'data-analysis', 'data-visualization', 'pandas', 'numpy', 'jupyter', 'bi',
+             'analytics', 'dashboard', 'etl'],
+    keywords: ['data science', 'data analysis', 'data visualization', 'pandas', 'jupyter',
+               'business intelligence', ' bi ', 'analytics', 'etl ', 'dashboard',
+               '数据分析', '可视化', '报表', '指标', '统计'],
+  }],
+  ['安全与隐私', {
+    topics: ['security', 'privacy', 'pentest', 'hacking', 'cryptography', 'firewall', 'vpn', 'proxy'],
+    keywords: ['security', 'privacy', 'pentest', 'penetration', 'hacking', 'exploit',
+               'cryptography', 'firewall', 'vpn ', 'zero-trust',
+               '安全', '隐私', '渗透', '加密', '防火墙'],
+  }],
+  ['网络与爬虫', {
+    topics: ['crawler', 'scraper', 'spider', 'scraping', 'proxy', 'http', 'network'],
+    keywords: ['web scraper', 'web-scraper', 'crawler', 'scraping', 'spider', 'http client',
+               'proxy server', 'network tool',
+               '爬虫', '抓取', '采集', '代理'],
+  }],
+  ['生活工具', {
+    topics: ['life', 'home-automation', 'smart-home', 'recipe', 'fitness', 'health', 'translator', 'weather'],
+    keywords: ['home automation', 'smart home', 'recipe', 'fitness', 'health', 'translator', 'weather',
+               'habit tracker',
+               '生活', '智能家居', '菜谱', '健身', '健康', '翻译', '天气', '习惯'],
+  }],
+  ['开发者辅助', {
+    topics: ['developer-tools', 'devtools', 'code-review', 'git', 'linter', 'formatter', 'ide', 'vscode',
+             'editor', 'debugger'],
+    keywords: ['developer tool', 'dev tool', 'code review', 'git helper', 'linter', 'formatter',
+               'ide ', 'vs code extension', 'vscode extension', 'debugger',
+               '开发工具', '调试', '代码格式化', '编辑器插件'],
+  }],
+];
+
+export function detectScenario(raw) {
+  const topics = (raw.topics || []).map((t) => String(t).toLowerCase());
+  const name = (raw.name || '').toLowerCase();
+  const desc = (raw.description || '').toLowerCase();
+  const blob = ` ${name} ${desc} ${topics.join(' ')} `;
+
+  for (const [scenario, rule] of SCENARIO_RULES) {
+    const topicHit = rule.topics && rule.topics.some((t) => topics.includes(t));
+    const kwHit = rule.keywords && rule.keywords.some((k) => blob.includes(k.toLowerCase()));
+    if (topicHit || kwHit) return scenario;
+  }
+  return '其他场景';
+}
+
 /* --------------------------- 中文说明 ----------------------------- */
 
-function generateGuide(raw, category) {
+function generateGuide(raw, category, scenario) {
   const desc = (raw.description || '').trim();
   const name = raw.name || '';
   const lang = raw.language || '';
   const topics = raw.topics || [];
 
-  // 1) 功能介绍：优先使用原始 description，如为空则基于分类/语言生成兜底
+  // 1) 功能介绍：优先使用原始 description，如为空则基于分类/语言/场景生成兜底
+  const scenarioHint = scenario && scenario !== '其他场景' ? `，适用场景是「${scenario}」` : '';
   const problemSolved = desc
     ? desc
-    : `${name} 是一个${category}类项目${lang ? `，主要使用 ${lang} 编写` : ''}。${topics.length ? '相关主题：' + topics.slice(0, 4).join('、') + '。' : ''}`;
+    : `${name} 是一个${category}类项目${lang ? `，主要使用 ${lang} 编写` : ''}${scenarioHint}。${topics.length ? '相关主题：' + topics.slice(0, 4).join('、') + '。' : ''}`;
 
   // 2) 使用指南：根据分类 + 语言生成针对性说明
   const usage = buildUsageGuide(category, lang, raw);
 
-  // 3) 能帮到你什么：根据分类给出 2-3 条实际价值
-  const helpsWith = buildHelpsWith(category, raw);
+  // 3) 能帮到你什么：根据场景 + 分类给出 2-4 条实际价值
+  const helpsWith = buildHelpsWith(category, scenario, raw);
 
   return { problemSolved, usage, helpsWith };
 }
@@ -367,8 +501,8 @@ function buildUsageGuide(category, language, raw) {
   return [catHint, langHint].filter(Boolean).join(' ') + extra;
 }
 
-function buildHelpsWith(category, raw) {
-  const map = {
+function buildHelpsWith(category, scenario, raw) {
+  const byCategory = {
     'AI 与大模型': ['快速搭建属于自己的 AI 应用', '学习主流大模型 / 智能体的落地方式', '复用已有 prompt 与工作流'],
     'Web 应用与站点': ['作为个人项目或作品集的起点', '学习现代前端架构', '直接部署供自己或他人使用'],
     '移动与桌面应用': ['作为跨平台应用的实现参考', '快速得到可分发的安装包', '复用 UI 交互方案'],
@@ -380,11 +514,36 @@ function buildHelpsWith(category, raw) {
     '游戏与创意': ['作为游戏制作学习样例', '直接游玩或二次创作', '参考玩法与代码设计'],
     '其他实用项目': ['解决某个特定的小问题', '作为工程参考样例', '按需裁剪为自己的模块'],
   };
-  const base = map[category] || map['其他实用项目'];
+
+  // 场景维度的价值描述，与技术用途正交
+  const byScenario = {
+    '金融投资': '帮助你在量化交易、行情分析或加密钱包等金融场景中节省造轮子时间',
+    'AI 技能与插件': '可作为 Cursor / Claude / Raycast 等工具的能力扩展直接使用',
+    '大模型开发': '提供从数据、微调到推理的链路参考，适合在自己的 AI 项目中复用',
+    '游戏娱乐': '直接游玩或在此基础上改造出自己的玩法',
+    '音乐与音频': '处理音乐、音频、TTS 等场景下的常见问题',
+    '图像与视频': '完成抠图、滤镜、剪辑或视觉识别等日常图像/视频任务',
+    '写作与小说': '为写作、笔记、博客等创作场景提供工具链',
+    '办公与效率': '减少重复性办公操作，让日常工作流更顺畅',
+    '学习与教育': '作为系统学习某领域或准备面试的第一手资料',
+    '数据分析': '快速搭建数据清洗、分析、可视化流水线',
+    '安全与隐私': '协助你在本地保护隐私或排查安全风险',
+    '网络与爬虫': '适合在数据采集、代理转发等网络场景中复用',
+    '生活工具': '改善生活中的具体小问题，比如翻译、天气、智能家居',
+    '开发者辅助': '作为开发过程中的提效工具集成到编辑器或流水线中',
+    '其他场景': '',
+  };
+
+  const base = byCategory[category] || byCategory['其他实用项目'];
+  const scenarioTip = byScenario[scenario];
   const extra = [];
+  if (scenarioTip) extra.push(scenarioTip);
   if ((raw.stargazers_count || 0) > 1000) extra.push('社区活跃度高，问题容易获得解答');
-  if (raw.license?.spdx_id && raw.license.spdx_id !== 'NOASSERTION') extra.push(`采用 ${raw.license.spdx_id} 开源协议，可放心参考`);
-  return [...base, ...extra].slice(0, 4);
+  if (raw.license?.spdx_id && raw.license.spdx_id !== 'NOASSERTION') {
+    extra.push(`采用 ${raw.license.spdx_id} 开源协议，可放心参考`);
+  }
+  // 场景提示优先放最前，保证和场景标签形成呼应
+  return [...(scenarioTip ? [scenarioTip] : []), ...base, ...extra.filter((e) => e !== scenarioTip)].slice(0, 4);
 }
 
 /* --------------------------- 杂项 ----------------------------- */
