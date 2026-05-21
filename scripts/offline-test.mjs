@@ -3,7 +3,7 @@
 
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 // ---- axios stub: github.js 只用 axios.get，网络部分在此测试中不会被调用 ----
 // 我们通过一个空对象占位；直接 import 时只要模块顶层不调用就不会出错。
@@ -13,7 +13,8 @@ import { pathToFileURL } from 'node:url';
 // 更简单的方案：读取源文件，替换 axios import 为空实现，再用 data: URL 动态导入。
 import fs from 'node:fs';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
 const src = fs.readFileSync(path.join(ROOT, 'src/utils/github.js'), 'utf8');
 
 const patched = src.replace(

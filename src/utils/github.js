@@ -19,20 +19,32 @@ export const parseProfileUrl = (input) => {
 /*  HTTP 工具                                                          */
 /* ------------------------------------------------------------------ */
 
+const cleanToken = (t) => {
+  if (!t) return '';
+  const trimmed = String(t).trim();
+  if (trimmed === 'undefined' || trimmed === 'null' || trimmed === '') {
+    return '';
+  }
+  return trimmed;
+};
+
 const buildHeaders = (token, accept = 'application/vnd.github+json') => {
   const h = { Accept: accept };
-  if (token) h.Authorization = `token ${token}`;
+  const cleaned = cleanToken(token);
+  if (cleaned) h.Authorization = `token ${cleaned}`;
   return h;
 };
 
 // 带翻页的增量拉取：按更新时间倒序取，遇到 <= sinceISO 的条目停止
-const fetchReposIncremental = async (username, token, sinceISO) => {
+const fetchReposIncremental = async (username, token, sinceISO, isTokenOwner = false) => {
   const headers = buildHeaders(token);
   const all = [];
   let page = 1;
   const perPage = 100;
   while (true) {
-    const url = `${BASE_URL}/users/${username}/repos?sort=updated&direction=desc&per_page=${perPage}&page=${page}`;
+    const url = isTokenOwner
+      ? `${BASE_URL}/user/repos?visibility=all&affiliation=owner&sort=updated&direction=desc&per_page=${perPage}&page=${page}`
+      : `${BASE_URL}/users/${username}/repos?sort=updated&direction=desc&per_page=${perPage}&page=${page}`;
     const res = await axios.get(url, { headers });
     if (!res.data || res.data.length === 0) break;
 
@@ -92,17 +104,51 @@ const fetchStarredIncremental = async (username, token, sinceISO) => {
  * @param sinceISO 上次同步时间（可选）。传入后仅返回之后变更的项目。
  */
 export const fetchAllData = async (username, token, sinceISO = null) => {
+  const useToken = cleanToken(token);
+  let isTokenOwner = false;
+  let activeToken = useToken;
+  let tokenError = false;
+
+  if (useToken) {
+    try {
+      const headers = { Accept: 'application/vnd.github+json', Authorization: `token ${useToken}` };
+      const userRes = await axios.get(`${BASE_URL}/user`, { headers });
+      if (userRes.data && userRes.data.login.toLowerCase() === username.toLowerCase()) {
+        isTokenOwner = true;
+      }
+    } catch (e) {
+      console.warn("Token 校验失败，将退回无 Token 的公共 API:", e.message);
+      activeToken = '';
+      tokenError = true;
+    }
+  }
+
   const [repos, starred] = await Promise.all([
-    fetchReposIncremental(username, token, sinceISO),
-    fetchStarredIncremental(username, token, sinceISO),
+    fetchReposIncremental(username, activeToken, sinceISO, isTokenOwner),
+    fetchStarredIncremental(username, activeToken, sinceISO),
   ]);
 
-  const combined = [
-    ...repos.map((r) => ({ ...r, __isOwner: true })),
-    ...starred.map((s) => ({ ...s, __isOwner: false })),
-  ];
+  const map = new Map();
 
-  return combined.map(normalizeProject);
+  repos.forEach((r) => {
+    map.set(r.id, { ...r, __isOwner: true, __isStarred: false });
+  });
+
+  starred.forEach((s) => {
+    if (map.has(s.id)) {
+      const existing = map.get(s.id);
+      existing.__isStarred = true;
+    } else {
+      map.set(s.id, { ...s, __isOwner: false, __isStarred: true });
+    }
+  });
+
+  const combined = Array.from(map.values());
+  const projects = combined.map(normalizeProject);
+  if (tokenError) {
+    projects.tokenError = true;
+  }
+  return projects;
 };
 
 /**
@@ -112,9 +158,12 @@ export const fetchAllData = async (username, token, sinceISO = null) => {
 export const fetchRecentActivity = async (username, token, projects, sinceISO = null) => {
   const headers = buildHeaders(token);
   const activities = [];
+  // 限制监控的项目数以防止 GitHub API 限流
+  // 无 Token 时仅监控最近更新的 3 个项目；有 Token 时监控前 15 个项目
+  const limit = token ? 15 : 3;
   const monitor = [...projects]
     .sort((a, b) => new Date(b.pushedAt || b.updatedAt) - new Date(a.pushedAt || a.updatedAt))
-    .slice(0, 25);
+    .slice(0, limit);
 
   for (const project of monitor) {
     // 1) release
@@ -138,7 +187,7 @@ export const fetchRecentActivity = async (username, token, projects, sinceISO = 
           continue; // 有发布则跳过 commit
         }
       }
-    } catch (_) { /* 忽略单项错误 */ }
+    } catch { /* 忽略单项错误 */ }
 
     // 2) 最新 commit
     try {
@@ -161,7 +210,7 @@ export const fetchRecentActivity = async (username, token, projects, sinceISO = 
           });
         }
       }
-    } catch (_) { /* 忽略 */ }
+    } catch { /* 忽略 */ }
   }
 
   return activities.sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -178,7 +227,7 @@ export const fetchReadmeSnippet = async (fullName, token) => {
     // 当使用 raw accept 时，res.data 就是纯文本
     const text = typeof res.data === 'string' ? res.data : '';
     return text.slice(0, 4000);
-  } catch (_) {
+  } catch {
     return '';
   }
 };
@@ -200,6 +249,7 @@ function normalizeProject(raw) {
     description: raw.description || '',
     url: raw.html_url,
     isOwner: !!raw.__isOwner,
+    isStarred: !!raw.__isStarred,
     starredAt: raw.__starred_at || null,
     language: raw.language || '其他',
     stars: raw.stargazers_count || 0,
@@ -223,6 +273,16 @@ function normalizeProject(raw) {
 export { normalizeProject };
 
 /* --------------------------- 分类 ----------------------------- */
+
+/**
+ * 分类与中文化规则说明 (详情见 docs/CLASSIFICATION_RULES.md)
+ * 1. 技术用途 (Category): 10大类，由 detectCategory 依次匹配关键字与主题进行判定。
+ * 2. 使用场景 (Scenario): 15大类，由 detectScenario 通过 SCENARIO_RULES 匹配规则进行判定。
+ * 3. 结构化信息: 由 generateGuide 生成：
+ *    - 项目核心定位 (problemSolved): 提取原生描述或基于分类和场景兜底拼装。
+ *    - 项目使用方式 (usage): 基于技术用途与开发语言组装针对性的上手步骤。
+ *    - 项目价值 (helpsWith): 生成 2-4 条具体研发提效与开源协议价值。
+ */
 
 // 分类标签用通俗中文，便于用户理解
 export const CATEGORY_LIST = [

@@ -105,7 +105,7 @@ export const resetAll = async () => {
   try {
     const db = await initDB();
     db.close();
-  } catch (_) { /* ignore */ }
+  } catch { /* ignore */ }
   dbPromise = null;
   return new Promise((resolve) => {
     const req = indexedDB.deleteDatabase(DB_NAME);

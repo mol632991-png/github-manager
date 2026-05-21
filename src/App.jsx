@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Github, Star, Search, Settings, X, Calendar, Code, RefreshCw,
   Activity, Grid, LogOut, GitFork, ExternalLink, User, Sparkles, Archive, BookOpen,
@@ -9,9 +9,10 @@ import {
 } from './utils/github';
 import {
   saveData, getAllData, getConfig, setConfig,
-  getLastSync, setLastSync, resetAll,
+  getLastSync, setLastSync, resetAll, clearStore,
 } from './utils/db';
 import ActivityFeed from './components/ActivityFeed';
+import { seedProjects, seedActivities } from './utils/seedData';
 
 const CATEGORY_ICONS = {
   'AI 与大模型': Sparkles,
@@ -24,6 +25,15 @@ const CATEGORY_ICONS = {
   '学习资源与清单': BookOpen,
   '游戏与创意': Sparkles,
   '其他实用项目': Grid,
+};
+
+const sanitizeToken = (t) => {
+  if (!t) return '';
+  const trimmed = String(t).trim();
+  if (trimmed === 'undefined' || trimmed === 'null' || trimmed === '') {
+    return '';
+  }
+  return trimmed;
 };
 
 function App() {
@@ -53,9 +63,31 @@ function App() {
   /* -------------- init -------------- */
   useEffect(() => {
     (async () => {
-      const user = await getConfig('activeUser');
-      const token = await getConfig('gh_token');
-      if (token) setGithubToken(token);
+      let user = await getConfig('activeUser');
+      const rawToken = await getConfig('gh_token');
+      const token = sanitizeToken(rawToken);
+      if (rawToken !== token) {
+        await setConfig('gh_token', token);
+      }
+      console.error("DEBUG-INFO - user:", user, "token:", token);
+      setGithubToken(token);
+
+      const existingProjects = await getAllData('projects');
+
+      if (!user) {
+        // Automatically seed with default user mol632991-png when database is empty
+        user = 'mol632991-png';
+        await setConfig('activeUser', user);
+        await setLastSync(user, '2026-05-20T12:00:00Z');
+        await saveData('projects', seedProjects);
+        await saveData('activity', seedActivities);
+      } else if (user === 'mol632991-png' && existingProjects.length === 0) {
+        // Seed if activeUser is already set to mol632991-png but projects list is empty
+        await setLastSync(user, '2026-05-20T12:00:00Z');
+        await saveData('projects', seedProjects);
+        await saveData('activity', seedActivities);
+      }
+
       if (user) {
         setUsername(user);
         setProfileInput(`https://github.com/${user}`);
@@ -78,6 +110,9 @@ function App() {
     setError('');
     setUsername(parsed);
     await setConfig('activeUser', parsed);
+    const cleanedToken = sanitizeToken(githubToken);
+    await setConfig('gh_token', cleanedToken);
+    setGithubToken(cleanedToken);
     await handleSync(parsed, { full: true });
   };
 
@@ -92,23 +127,54 @@ function App() {
     setSyncMsg('正在从 GitHub 拉取最新数据…');
 
     try {
-      const prevSync = opts.full ? null : await getLastSync(targetUser);
-      const incoming = await fetchAllData(targetUser, githubToken, prevSync);
+      const existing = await getAllData('projects');
+      const hasSeed = existing.some((p) => p.id === 1 && p.name === 'predict-raven');
+      let prevSync = opts.full ? null : await getLastSync(targetUser);
+      const isSeedSync = prevSync === '2026-05-20T12:00:00Z' || hasSeed;
+      
+      const shouldForceFull = opts.full || isSeedSync || existing.length === 0;
+      if (shouldForceFull) {
+        prevSync = null; // 强制全量同步以获取真实仓库数据
+      }
 
-      // 合并策略：已有项目按 id 更新，不在本次返回的保留
-      const existing = opts.full ? [] : await getAllData('projects');
-      const map = new Map(existing.map((p) => [p.id, p]));
-      incoming.forEach((p) => map.set(p.id, p));
+      let currentToken = githubToken;
+      const incoming = await fetchAllData(targetUser, currentToken, prevSync);
+
+      if (incoming.tokenError) {
+        setError('Token 无效或已过期，已退回匿名模式同步。如需同步私有仓库，请在“设置”中配置正确的 Token。');
+        await setConfig('gh_token', '');
+        setGithubToken('');
+        currentToken = '';
+      }
+
+      // 合并策略：已有项目按 id 更新，若是全量同步或从种子数据同步则清空历史以防止数据混杂
+      const isFull = shouldForceFull;
+      const existingList = isFull ? [] : existing;
+      const map = new Map(existingList.map((p) => [p.id, p]));
+
+      incoming.forEach((p) => {
+        if (map.has(p.id)) {
+          const existingProj = map.get(p.id);
+          p.isOwner = p.isOwner || existingProj.isOwner;
+          p.isStarred = p.isStarred || existingProj.isStarred;
+        }
+        map.set(p.id, p);
+      });
       const merged = Array.from(map.values());
 
       // 获取动态（时间线）
       setSyncMsg('正在整理更新日志…');
-      const newActs = await fetchRecentActivity(targetUser, githubToken, merged, prevSync);
-      const actMap = new Map((opts.full ? [] : await getAllData('activity')).map((a) => [a.id, a]));
+      const newActs = await fetchRecentActivity(targetUser, currentToken, merged, prevSync);
+      const actMap = new Map((isFull ? [] : await getAllData('activity')).map((a) => [a.id, a]));
       newActs.forEach((a) => actMap.set(a.id, a));
       const mergedActs = Array.from(actMap.values())
         .sort((a, b) => new Date(b.date) - new Date(a.date))
         .slice(0, 200); // 最多保留 200 条
+
+      if (isFull) {
+        await clearStore('projects');
+        await clearStore('activity');
+      }
 
       await saveData('projects', merged);
       await saveData('activity', mergedActs);
@@ -122,7 +188,7 @@ function App() {
 
       const delta = incoming.length;
       setSyncMsg(
-        opts.full
+        isFull
           ? `同步完成，共获取 ${merged.length} 个项目。`
           : delta === 0
             ? '已是最新，本次无新增或变更。'
@@ -134,7 +200,7 @@ function App() {
       const status = err?.response?.status;
       if (status === 404) setError('未找到该 GitHub 用户，请检查主页地址是否正确。');
       else if (status === 403) setError('已触发 GitHub 限流。建议在设置中填入个人 Token 后再同步。');
-      else if (status === 401) setError('Token 无效，请在设置中检查。');
+      else if (status === 401) setError('Token 无效或已过期，请在设置中检查。如果不需要 Token，可在设置中将其清空以使用匿名限额同步。');
       else setError('同步失败：' + (err?.message || '网络异常，请稍后重试。'));
       setSyncMsg('');
     } finally {
@@ -182,7 +248,7 @@ function App() {
     const term = searchTerm.toLowerCase().trim();
     const list = projects.filter((p) => {
       if (filterType === 'owned' && !p.isOwner) return false;
-      if (filterType === 'starred' && p.isOwner) return false;
+      if (filterType === 'starred' && !p.isStarred) return false;
       if (filterCategory !== 'all' && p.category !== filterCategory) return false;
       if (filterScenario !== 'all' && p.scenario !== filterScenario) return false;
       if (filterLang !== 'all' && p.language !== filterLang) return false;
@@ -201,7 +267,7 @@ function App() {
   }, [projects, searchTerm, filterType, filterCategory, filterScenario, filterLang, sortBy]);
 
   const ownedCount = projects.filter((p) => p.isOwner).length;
-  const starredCount = projects.length - ownedCount;
+  const starredCount = projects.filter((p) => p.isStarred).length;
 
   /* -------------- UI: 首次进入（仅需 GitHub 主页） -------------- */
   if (!username) {
@@ -240,7 +306,11 @@ function App() {
               placeholder="GitHub Personal Access Token（可选）"
               value={githubToken}
               onChange={(e) => setGithubToken(e.target.value)}
-              onBlur={() => setConfig('gh_token', githubToken)}
+              onBlur={async () => {
+                const cleaned = sanitizeToken(githubToken);
+                await setConfig('gh_token', cleaned);
+                setGithubToken(cleaned);
+              }}
               style={{ marginTop: '0.75rem' }}
             />
           </details>
@@ -497,12 +567,17 @@ function App() {
 
               <button
                 onClick={async () => {
-                  await setConfig('gh_token', githubToken);
+                  const cleanedToken = sanitizeToken(githubToken);
+                  await setConfig('gh_token', cleanedToken);
+                  setGithubToken(cleanedToken);
                   const newUser = parseProfileUrl(profileInput);
-                  if (newUser && newUser !== username) {
-                    await setConfig('activeUser', newUser);
-                    setUsername(newUser);
-                    await handleSync(newUser, { full: true });
+                  if (newUser) {
+                    const isNewUser = newUser !== username;
+                    if (isNewUser) {
+                      await setConfig('activeUser', newUser);
+                      setUsername(newUser);
+                    }
+                    await handleSync(newUser, { full: isNewUser });
                   }
                   setShowSettings(false);
                 }}

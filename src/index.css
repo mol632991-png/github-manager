@@ -661,7 +661,7 @@ a { color: inherit; text-decoration: none; }
   font-weight: 600;
 }
 
-.detail-section p { color: #e2e8f0; font-size: 0.95rem; line-height: 1.65; }
+.detail-section p { color: #e2e8f0; font-size: 0.95rem; line-height: 1.65; white-space: pre-wrap; }
 
 .helps-list { list-style: none; padding: 0; }
 .helps-list li {
