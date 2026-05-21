@@ -5,7 +5,7 @@
  * - config:    key-value 存储（如 lastSync:<username>、activeUser 等）
  */
 const DB_NAME = 'GitHubManagerDB';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbPromise = null;
 
@@ -24,6 +24,9 @@ export const initDB = () => {
       }
       if (!db.objectStoreNames.contains('config')) {
         db.createObjectStore('config', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('x_bookmarks')) {
+        db.createObjectStore('x_bookmarks', { keyPath: 'id' });
       }
     };
 

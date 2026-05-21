@@ -4,6 +4,7 @@
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseXBookmarks } from '../src/utils/xParser.js';
 
 // ---- axios stub: github.js 只用 axios.get，网络部分在此测试中不会被调用 ----
 // 我们通过一个空对象占位；直接 import 时只要模块顶层不调用就不会出错。
@@ -152,6 +153,154 @@ const p3 = normalizeProject({
 t('category = AI 与大模型', () => eq(p3.category, 'AI 与大模型'));
 t('scenario = AI 技能与插件', () => eq(p3.scenario, 'AI 技能与插件'));
 t('helpsWith 含场景价值', () => truthy(p3.helpsWith.some((h) => h.includes('Cursor') || h.includes('Claude') || h.includes('插件') || h.includes('扩展'))));
+
+console.log('\n[8] parseXBookmarks 本地启发式解析测试');
+const mockRawText = `Andrej Karpathy @karpathy · 2h
+My thoughts on LLM Wiki & Knowledge Bases.
+Instead of building bloated GUI tools for personal wiki, I've been using a flat folder of markdown files linked with double brackets, and letting Claude Code index and search them.
+1.2K 💬 4.5K 🔁 10K 💟 100K views
+
+@mol632991-png · 2026-05-20
+今天开源了 PredictRaven 自动交易代理！
+基于去中心化预测市场 Polymarket 的智能决策交易系统。接入了 DeepSeek-V3 决策大脑。
+200 💬 1.5K 🔁 3K 💟 15K 浏览
+
+Some User
+@some-user
+
+·
+
+10:20 AM · May 21, 2026
+This is a test post with multiple empty lines and time suffix.
+10 Retweets 5 Likes
+
+AI / Web3 Developer @mol632991-png · 2026年5月21日 上午10:20
+This is a test post for display names with slashes.
+10 Likes
+
+Another User @another-user
+·
+上午10:20 · 2026年5月21日
+This is a test post for Chinese leading time prefix.
+2 Likes`;
+
+const parsedX = parseXBookmarks(mockRawText);
+
+t('解析出的贴文数量为 5', () => eq(parsedX.length, 5));
+
+const post1 = parsedX[0];
+t('第一篇博主为 @karpathy', () => eq(post1.blogger, '@karpathy'));
+t('第一篇包含 markdown 相关的标签', () => truthy(post1.tags.includes('Markdown') || post1.tags.includes('知识管理')));
+t('第一篇核心内容非空且提炼首句', () => truthy(post1.coreContent.includes('My thoughts on LLM Wiki')));
+
+const post2 = parsedX[1];
+t('第二篇博主为 @mol632991-png', () => eq(post2.blogger, '@mol632991-png'));
+t('第二篇日期正确解析为 2026-05-20', () => eq(post2.publishDate, '2026-05-20'));
+t('第二篇包含 AI Agent 和 DeepSeek 标签', () => {
+  truthy(post2.tags.includes('AI Agent'));
+  truthy(post2.tags.includes('DeepSeek'));
+});
+t('第二篇去除了底部互动指标行', () => {
+  truthy(!post2.rawText.includes('15K 浏览'));
+  truthy(!post2.rawText.includes('200 💬'));
+});
+
+const post3 = parsedX[2];
+t('第三篇博主为 @some-user', () => eq(post3.blogger, '@some-user'));
+t('第三篇日期正确解析并清洗时间为 2026-05-21', () => eq(post3.publishDate, '2026-05-21'));
+t('第三篇包含测试用正文且过滤了 Retweets 行', () => {
+  truthy(post3.rawText.includes('This is a test post'));
+  truthy(!post3.rawText.includes('10 Retweets'));
+});
+
+const post4 = parsedX[3];
+t('第四篇包含斜杠名字并且博主为 @mol632991-png', () => eq(post4.blogger, '@mol632991-png'));
+t('第四篇日期正确解析为 2026-05-21', () => eq(post4.publishDate, '2026-05-21'));
+
+const post5 = parsedX[4];
+t('第五篇博主为 @another-user', () => eq(post5.blogger, '@another-user'));
+t('第五篇日期正确解析为 2026-05-21', () => eq(post5.publishDate, '2026-05-21'));
+
+console.log('\n[9] parseXBookmarks 健壮性与多格式解析测试');
+const mockRobustRawText = `User @ Company @john_doe · 5w
+This is a post from 5 weeks ago with an @ in the display name.
+10 Likes
+
+UK User @uk-user · 20 May 2026
+This is a UK formatted date post.
+5 Likes
+
+Dot Date User @dot-user · 2026.05.15
+This is a dot separated numeric date post.
+5 Likes
+
+Separator User @sep-user
+*
+1y
+This is an arbitrary separator dot post with 1 year relative time.
+5 Likes
+
+Chinese Rel User @cn-user
+·
+1周前
+This is a Chinese relative weeks post.
+5 Likes`;
+
+const parsedRobust = parseXBookmarks(mockRobustRawText);
+t('健壮性测试解析出 5 篇', () => eq(parsedRobust.length, 5));
+
+t('第一篇博主解析出 @john_doe (支持 display name 包含 @)', () => eq(parsedRobust[0].blogger, '@john_doe'));
+t('第一篇 5w 日期正确计算为 35 天前', () => {
+  const expected = new Date();
+  expected.setDate(expected.getDate() - 35);
+  eq(parsedRobust[0].publishDate, expected.toISOString().split('T')[0]);
+});
+
+t('第二篇 20 May 2026 日期正确解析为 2026-05-20', () => eq(parsedRobust[1].publishDate, '2026-05-20'));
+t('第三篇 2026.05.15 日期正确解析为 2026-05-15', () => eq(parsedRobust[2].publishDate, '2026-05-15'));
+
+t('第四篇 1y 日期正确计算为 1 年前，且支持任意分隔符 *', () => {
+  const expected = new Date();
+  expected.setFullYear(expected.getFullYear() - 1);
+  eq(parsedRobust[3].publishDate, expected.toISOString().split('T')[0]);
+  eq(parsedRobust[3].blogger, '@sep-user');
+});
+
+t('第五篇 1周前 日期正确计算为 7 天前', () => {
+  const expected = new Date();
+  expected.setDate(expected.getDate() - 7);
+  eq(parsedRobust[4].publishDate, expected.toISOString().split('T')[0]);
+  eq(parsedRobust[4].blogger, '@cn-user');
+});
+
+console.log('\n[10] parseXBookmarks 回复推文与防止显示名称泄漏测试');
+const mockReplyAndLeakRawText = `User A @user-a · 2026.05.01
+This is a standard tweet from User A.
+5 Likes
+
+User B
+@user-b
+Replying to @user-a
+2026.05.02
+This is a reply tweet from User B.
+10 Likes
+
+User C @user-c · 2026.05.03
+This is another tweet from User C.
+Next Display Name
+@user-d · 2026.05.04
+This is a tweet from User D. The previous display name line should be skipped and not leak into User C's body.
+1 Like`;
+
+const parsedReplyLeak = parseXBookmarks(mockReplyAndLeakRawText);
+t('解析出 4 篇推文', () => eq(parsedReplyLeak.length, 4));
+t('第二篇博主为 @user-b (排除 Replying to @user-a 作为作者)', () => eq(parsedReplyLeak[1].blogger, '@user-b'));
+t('第二篇日期正确解析为 2026-05-02 (lookahead 成功跨过回复行)', () => eq(parsedReplyLeak[1].publishDate, '2026-05-02'));
+t('第三篇不应包含 "Next Display Name" (防止显示名称泄漏)', () => {
+  truthy(!parsedReplyLeak[2].rawText.includes('Next Display Name'), 'should not contain Next Display Name');
+  eq(parsedReplyLeak[2].blogger, '@user-c');
+});
+t('第四篇博主为 @user-d', () => eq(parsedReplyLeak[3].blogger, '@user-d'));
 
 console.log(`\n===================================`);
 console.log(`通过 ${pass} 项，失败 ${fail} 项`);
