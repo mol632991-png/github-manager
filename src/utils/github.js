@@ -503,20 +503,187 @@ export function detectScenario(raw) {
 
 /* --------------------------- 中文说明 ----------------------------- */
 
+/**
+ * 将英文或混合描述转换为纯中文核心功能描述
+ * 核心策略：用项目名称 + 所属领域 + 场景合成自然中文句子，
+ * 并在末尾附上原始英文描述供参考
+ */
+function buildChineseCoreFunc(desc, name, lang, category, scenario) {
+  // 中文域名描述模版
+  const categoryDescMap = {
+    'AI 与大模型': '一款人工智能与大语言模型相关工具',
+    'Web 应用与站点': '一款网页应用或可视化站点',
+    '移动与桌面应用': '一款移动端或桌面端本地应用',
+    '命令行与工具软件': '一款命令行终端工具',
+    '开发框架与 SDK': '一个开发框架或软件开发工具包',
+    '数据与后端服务': '一款数据处理或后端服务程序',
+    'DevOps 与运维': '一款部署运维自动化工具',
+    '学习资源与清单': '一份学习资源清单或技术参考合集',
+    '游戏与创意': '一款游戏或创意互动项目',
+    '其他实用项目': '一个实用性开源工具项目',
+  };
+
+  const categoryDesc = categoryDescMap[category] || '一个开源软件项目';
+  const scenarioPart = (scenario && scenario !== '其他场景') ? `，专注于「${scenario}」场景` : '';
+  const langPart = lang ? `，使用 ${lang} 语言开发` : '';
+
+  // 构建中文核心功能描述
+  let cnDesc = `${name} 是${categoryDesc}${scenarioPart}${langPart}。`;
+
+  // 如果有原始英文描述，附在末尾作为补充参考
+  if (desc) {
+    // 过滤掉纯 URL 和特殊标记符的行
+    const cleanDesc = desc.replace(/https?:\/\/\S+/g, '').replace(/--.*$/, '').trim();
+    if (cleanDesc.length > 2) {
+      cnDesc += `（开发者原文介绍：${cleanDesc}）`;
+    }
+  }
+
+  return cnDesc;
+}
+
 function generateGuide(raw, category, scenario) {
   const desc = (raw.description || '').trim();
   const name = raw.name || '';
   const lang = raw.language || '';
   const topics = raw.topics || [];
+  const license = raw.license?.spdx_id || raw.license?.name || '';
+  const archived = !!raw.archived;
 
-  // 1) 功能介绍：优先使用原始 description，如为空则基于分类/语言/场景生成兜底
-  const scenarioHint = scenario && scenario !== '其他场景' ? `，适用场景是「${scenario}」` : '';
-  const problemSolved = desc
-    ? desc
-    : `${name} 是一个${category}类项目${lang ? `，主要使用 ${lang} 编写` : ''}${scenarioHint}。${topics.length ? '相关主题：' + topics.slice(0, 4).join('、') + '。' : ''}`;
+  // --- 一、项目核心定位 (始终为纯中文) ---
+  const coreFunc = buildChineseCoreFunc(desc, name, lang, category, scenario);
 
-  // 2) 使用指南：根据分类 + 语言生成针对性说明
-  const usage = buildUsageGuide(category, lang, raw);
+  // 应用场景 / 能力
+  let appScenario = '';
+  switch (category) {
+    case 'AI 与大模型':
+      appScenario = '主要用于人工智能应用构建、自动化推理或智能体调度，解决大模型复杂逻辑和流程对接问题。';
+      break;
+    case 'Web 应用与站点':
+      appScenario = '主要用于网页前端展示、信息发布或管理控制台界面构建，解决网页交互与多端自适应展示问题。';
+      break;
+    case '移动与桌面应用':
+      appScenario = '主要用于本地客户端应用运行，解决移动端或桌面端无网离线工作与交互体验问题。';
+      break;
+    case '命令行与工具软件':
+      appScenario = '主要用于终端下的快速任务执行与工具调用，解决日常重复性手工操作、实现流程自动化。';
+      break;
+    case '开发框架与 SDK':
+      appScenario = '主要作为第三方依赖库引入，提供通用的接口封装与核心逻辑，避免重复造轮子。';
+      break;
+    case '数据与后端服务':
+      appScenario = '主要作为后端服务或数据库工具运行，解决数据存储、接口高并发及持久化逻辑处理问题。';
+      break;
+    case 'DevOps 与运维':
+      appScenario = '主要用于服务器集群管理、监控告警或自动化部署流水线构建，降低运维复杂度。';
+      break;
+    case '学习资源与清单':
+      appScenario = '主要用于系统学习、技术路线规划和优秀开源项目发现，解决开发者信息零散的问题。';
+      break;
+    case '游戏与创意':
+      appScenario = '主要用于创意互动体验、休闲娱乐或游戏引擎开发学习，探索多媒体与交互艺术。';
+      break;
+    default:
+      appScenario = '用于特定开发或业务环节，解决重复性工程编码问题，提高模块复用能力。';
+  }
+  if (scenario && scenario !== '其他场景') {
+    appScenario += ` 并广泛适用于「${scenario}」相关的具体业务场景。`;
+  }
+
+  // --- 二、项目使用方式 ---
+  const steps = buildUsageGuide(category, lang, raw);
+  
+  let coreUsage = '本地部署启动、自托管运行，或作为模块集成到现有开发环境中。';
+  if (category === '学习资源与清单') {
+    coreUsage = '本地克隆作为参考文档，或直接在 GitHub 页面翻阅和学习。';
+  } else if (category === '开发框架与 SDK') {
+    coreUsage = '在本地项目中引入该依赖库，用于开发和二次封装。';
+  } else if (category === 'AI 与大模型') {
+    coreUsage = '本地自托管运行或集成到人工智能客户端作为核心推理后端。';
+  } else if (category === '命令行与工具软件') {
+    coreUsage = '通过终端命令行直接调用执行，处理特定数据或自动化流程。';
+  }
+
+  let extraUsage = '通过容器化（Docker）打包部署到生产集群，或配合自动化触发器实现无人值守运维流程。';
+  if (category === '学习资源与清单') {
+    extraUsage = '作为团队内部的技术规范和参考手册，或结合翻译工具构建中文知识库。';
+  } else if (category === '开发框架与 SDK') {
+    extraUsage = '为框架编写自定义插件扩展，或向官方提交代码贡献核心功能模块。';
+  } else if (category === 'AI 与大模型') {
+    extraUsage = '接入多款不同的国内外大语言模型接口，或拓展为私有化的多智能体协同系统。';
+  }
+
+  const problemSolved = `一、项目核心定位
+• 核心功能：${coreFunc}
+• 适用场景：${appScenario}
+• 所属领域：${category} ／ ${scenario}
+
+二、项目使用方式
+• 启动步骤：${steps}
+• 主要用法：${coreUsage}
+• 进阶用法：${extraUsage}`;
+
+  // --- 三、项目独立性分析 ---
+  let independence = '是。项目具备完整的运行逻辑，可以在本地或服务器中独立运行。';
+  if (category === '学习资源与清单') {
+    independence = '是。作为一个资源合集，可以直接离线浏览阅读，无需配套运行服务。';
+  } else if (category === '开发框架与 SDK') {
+    independence = '部分场景可。主要作为组件/库依赖嵌入到宿主程序中，无法单独作为完整应用使用。';
+  } else if (category === 'AI 与大模型') {
+    independence = '部分场景可。核心逻辑可单机启动，但需要配置并联网访问大模型 API 密钥（或本地搭建的大模型实例）作为推理大脑。';
+  }
+
+  let dependenciesList = '';
+  const langLower = lang.toLowerCase();
+  if (langLower.includes('javascript') || langLower.includes('typescript') || langLower.includes('node')) {
+    dependenciesList = '  1. Node.js 运行环境 (v18+)\n  2. 包管理器 (npm / yarn / pnpm)';
+  } else if (langLower.includes('python')) {
+    dependenciesList = '  1. Python 3 环境 (v3.8+)\n  2. 第三方库依赖管理工具 (pip / poetry)';
+  } else if (langLower.includes('go')) {
+    dependenciesList = '  1. Go 语言编译器环境 (v1.18+)';
+  } else if (langLower.includes('rust')) {
+    dependenciesList = '  1. Rust 编译器与 Cargo 包管理器';
+  } else {
+    dependenciesList = '  1. 对应开发语言的运行/编译环境\n  2. 包依赖管理及构建工具';
+  }
+  if (category === 'AI 与大模型') {
+    dependenciesList += '\n  3. 大模型 API 访问凭证 (如 DeepSeek, OpenAI Key)';
+  } else if (category === 'DevOps 与运维') {
+    dependenciesList += '\n  3. Docker/Kubernetes 等容器运行时';
+  }
+
+  let envConfig = '常规 CPU 运行环境即可，若需要发布为公网服务则建议部署在云服务器中。';
+  if (category === '学习资源与清单') {
+    envConfig = '无特殊硬件要求，支持 Markdown 预览的编辑器或浏览器即可。';
+  } else if (category === 'AI 与大模型') {
+    envConfig = '本地运行需能够稳定访问大模型 API 端点；若进行本地大模型推理，需较好的 GPU/NPU 硬件支持。';
+  }
+
+  // --- 四、关键注意事项 ---
+  let preconditions = '确保本地环境已成功搭建，并且克隆仓库后能正确通过包管理器安装所有依赖。';
+  if (category === 'AI 与大模型') {
+    preconditions = '需要提前申请并配置大模型 API 密钥（ApiKey）并确保本地网络能顺畅连接大模型端点。';
+  }
+  if (archived) {
+    preconditions += ' 此外，项目已被作者归档（Archived），请注意该项目不再接受更新，建议作为参考和学习代码。';
+  }
+
+  let limits = '主要受限于当前的硬件网络条件，部分特定平台库可能仅在 Linux/macOS 下获得最佳兼容性。';
+  if (category === 'AI 与大模型') {
+    limits = '性能和响应速度受限于大模型上下文长度（Context Length）限制以及 API 的 QPS 请求速率与计费额度限制。';
+  } else if (category === '学习资源与清单') {
+    limits = '内容可能存在时效性，随着技术演进部分参考链接或项目配置可能会失效。';
+  }
+
+  const usage = `三、项目独立性分析
+• 独立运行能力：${independence}
+• 配套依赖清单：
+${dependenciesList}
+• 基础环境配置：${envConfig}
+
+四、关键注意事项
+• 核心前提：${preconditions}
+• 典型使用限制：${limits}`;
 
   // 3) 能帮到你什么：根据场景 + 分类给出 2-4 条实际价值
   const helpsWith = buildHelpsWith(category, scenario, raw);

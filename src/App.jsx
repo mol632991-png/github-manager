@@ -15,7 +15,7 @@ import {
 import ActivityFeed from './components/ActivityFeed';
 import { seedProjects, seedActivities } from './utils/seedData';
 import { seedXBookmarks } from './utils/seedXData';
-import { parseXBookmarks, aiExtractXBookmarks } from './utils/xParser';
+import { parseXBookmarks, aiExtractXBookmarks, parseGraphQLRawBookmarks } from './utils/xParser';
 
 const CATEGORY_ICONS = {
   'AI 与大模型': Sparkles,
@@ -104,12 +104,30 @@ function App() {
   const [xImportText, setXImportText] = useState('');
   const [xImportMode, setXImportMode] = useState('local');
   const [xImportError, setXImportError] = useState('');
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [changeUsername, setChangeUsername] = useState('');
+  const [changeOldPassword, setChangeOldPassword] = useState('');
+  const [changeNewPassword, setChangeNewPassword] = useState('');
+  const [changeConfirmPassword, setChangeConfirmPassword] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
 
   // LLM Config States (legacy states updated via toggled active custom API)
   const [xApiKey, setXApiKey] = useState('');
   const [xApiHost, setXApiHost] = useState('https://api.deepseek.com');
   const [xApiModel, setXApiModel] = useState('deepseek-chat');
   const [xBookmarksUrl, setXBookmarksUrl] = useState('https://x.com/i/bookmarks');
+
+  // Extension states
+  const [xExtensionId, setXExtensionId] = useState('');
+  const [isExtensionInstalled, setIsExtensionInstalled] = useState(false);
+  const [extensionBookmarksCount, setExtensionBookmarksCount] = useState(0);
+  const [initXExtensionId, setInitXExtensionId] = useState('');
+
+  // Test/ping states
+  const [onboardingPingLoading, setOnboardingPingLoading] = useState(false);
+  const [onboardingPingResult, setOnboardingPingResult] = useState(null);
+  const [settingsPingResult, setSettingsPingResult] = useState(null);
 
   /* -------------- data isolation helpers -------------- */
   const clearStoreForUser = async (storeName, user) => {
@@ -162,6 +180,7 @@ function App() {
     const rawXApiHost = await getConfig(prefix + 'x_api_host') || 'https://api.deepseek.com';
     const rawXApiModel = await getConfig(prefix + 'x_api_model') || 'deepseek-chat';
     const rawXBookmarksUrl = await getConfig(prefix + 'x_bookmarks_url') || 'https://x.com/i/bookmarks';
+    const rawXExtensionId = await getConfig(prefix + 'x_extension_id') || '';
     const rawCustomApis = await getConfig(prefix + 'custom_apis') || '[]';
     const rawActiveApiId = await getConfig(prefix + 'active_api_id') || '';
 
@@ -177,6 +196,7 @@ function App() {
     setXApiHost(rawXApiHost);
     setXApiModel(rawXApiModel);
     setXBookmarksUrl(rawXBookmarksUrl);
+    setXExtensionId(rawXExtensionId);
     setCustomApis(parsedCustomApis);
     setActiveApiId(rawActiveApiId);
 
@@ -226,14 +246,225 @@ function App() {
       setLastSyncState(null);
 
       setInitProfileInput('');
-      setInitGithubToken('');
       setInitXBookmarksUrl('https://x.com/i/bookmarks');
+      setInitXExtensionId('');
       setInitApiKey('');
       setInitApiHost('https://api.deepseek.com');
       setInitApiModel('deepseek-chat');
       setInitApiAlias('默认 API');
     }
   };
+
+  // 检查/测试插件状态的辅助函数
+  const pingExtension = (extensionId) => {
+    return new Promise((resolve) => {
+      if (!window.chrome || !chrome.runtime || !chrome.runtime.sendMessage) {
+        resolve({ success: false, reason: 'chrome_not_available' });
+        return;
+      }
+      if (!extensionId) {
+        resolve({ success: false, reason: 'no_id' });
+        return;
+      }
+      try {
+        const timer = setTimeout(() => {
+          resolve({ success: false, reason: 'timeout' });
+        }, 1500);
+
+        chrome.runtime.sendMessage(extensionId, { type: 'PING' }, (response) => {
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) {
+            resolve({ success: false, error: chrome.runtime.lastError.message });
+          } else if (response && response.success) {
+            resolve({ success: true, response });
+          } else {
+            resolve({ success: false, error: 'invalid_response' });
+          }
+        });
+      } catch (e) {
+        resolve({ success: false, error: e.message });
+      }
+    });
+  };
+
+  const fetchExtensionBookmarksCount = (extensionId) => {
+    return new Promise((resolve) => {
+      if (!window.chrome || !chrome.runtime || !chrome.runtime.sendMessage || !extensionId) {
+        resolve(0);
+        return;
+      }
+      try {
+        const timer = setTimeout(() => {
+          resolve(0);
+        }, 1500);
+        chrome.runtime.sendMessage(extensionId, { type: 'GET_CAPTURED_BOOKMARKS' }, (response) => {
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) {
+            resolve(0);
+          } else if (response && response.success && Array.isArray(response.bookmarks)) {
+            resolve(response.bookmarks.length);
+          } else {
+            resolve(0);
+          }
+        });
+      } catch (e) {
+        resolve(0);
+      }
+    });
+  };
+
+  const handleTestOnboardingExtension = async () => {
+    if (!initXExtensionId.trim()) {
+      setOnboardingPingResult({ success: false, message: '请先输入扩展程序 ID' });
+      return;
+    }
+    setOnboardingPingLoading(true);
+    setOnboardingPingResult(null);
+    const res = await pingExtension(initXExtensionId.trim());
+    setOnboardingPingLoading(false);
+    if (res.success) {
+      setOnboardingPingResult({ success: true, message: '联机成功！已检测到 GitHub-Manager X 助手。' });
+    } else {
+      setOnboardingPingResult({
+        success: false,
+        message: '检测失败，请确认扩展程序已正确加载，且 ID 输入无误。'
+      });
+    }
+  };
+
+  const handleTestSettingsExtension = async () => {
+    if (!xExtensionId.trim()) {
+      setSettingsPingResult({ success: false, message: '请先输入插件 ID' });
+      return;
+    }
+    setSettingsPingResult(null);
+    const res = await pingExtension(xExtensionId.trim());
+    if (res.success) {
+      setSettingsPingResult({ success: true, message: '连接成功！' });
+    } else {
+      setSettingsPingResult({ success: false, message: '未检测到插件，请检查 ID 是否正确且插件已启用。' });
+    }
+  };
+
+  const handleSyncExtensionBookmarks = async () => {
+    if (!xExtensionId) {
+      setError('未配置插件 ID，请先在设置中进行配置。');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    setSyncMsg('正在从 X 助手插件拉取捕获的书签…');
+    try {
+      const response = await new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(xExtensionId, { type: 'GET_CAPTURED_BOOKMARKS' }, (res) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (res && res.success) {
+            resolve(res);
+          } else {
+            reject(new Error('从插件获取数据失败'));
+          }
+        });
+      });
+
+      const rawList = response.bookmarks || [];
+      if (rawList.length === 0) {
+        setSyncMsg('插件缓存中暂无捕获的书签。请先去 X.com/i/bookmarks 浏览和抓取。');
+        setTimeout(() => setSyncMsg(''), 4000);
+        setLoading(false);
+        return;
+      }
+
+      const parsed = parseGraphQLRawBookmarks(rawList);
+      const userParsed = parsed.map(item => ({
+        ...item,
+        localUser: loggedInUser
+      }));
+
+      const existing = await getAllData('x_bookmarks');
+      const userExisting = existing.filter(b => b.localUser === loggedInUser);
+      const existingMap = new Map(userExisting.map(b => [b.id, b]));
+      
+      // 全新的书签
+      const newItems = userParsed.filter(b => !existingMap.has(b.id));
+      // 之前解析时博主信息缺失（@unknown），现在用新解析结果覆盖更新
+      const fixedItems = userParsed.filter(b => {
+        const old = existingMap.get(b.id);
+        return old && old.blogger === '@unknown' && b.blogger !== '@unknown';
+      });
+
+      const toSave = [...newItems, ...fixedItems];
+      if (toSave.length > 0) {
+        await saveData('x_bookmarks', toSave);
+        setXBookmarks(prev => {
+          // 用修复后的条目替换旧的 @unknown 条目，再把全新条目追加到头部
+          const fixedIds = new Set(fixedItems.map(b => b.id));
+          const kept = prev.filter(b => !fixedIds.has(b.id));
+          return [...newItems, ...fixedItems, ...kept];
+        });
+        const parts = [];
+        if (newItems.length > 0) parts.push(`新增 ${newItems.length} 条`);
+        if (fixedItems.length > 0) parts.push(`修复博主信息 ${fixedItems.length} 条`);
+        setSyncMsg(`同步完成！${parts.join('，')}。`);
+      } else {
+        setSyncMsg('导入完成，检测到所有已捕获书签在本地均已存在且博主信息正常。');
+      }
+
+      await new Promise((resolve) => {
+        chrome.runtime.sendMessage(xExtensionId, { type: 'CLEAR_CAPTURED_BOOKMARKS' }, (res) => {
+          resolve(res);
+        });
+      });
+
+      setExtensionBookmarksCount(0);
+      setTimeout(() => setSyncMsg(''), 4000);
+    } catch (err) {
+      console.error(err);
+      setError('从插件同步书签失败：' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!loggedInUser || !xExtensionId) {
+      setIsExtensionInstalled(false);
+      setExtensionBookmarksCount(0);
+      return;
+    }
+
+    let active = true;
+    const check = async () => {
+      const pingRes = await pingExtension(xExtensionId);
+      if (!active) return;
+      if (pingRes.success) {
+        setIsExtensionInstalled(true);
+        const count = await fetchExtensionBookmarksCount(xExtensionId);
+        if (!active) return;
+        setExtensionBookmarksCount(count);
+      } else {
+        setIsExtensionInstalled(false);
+        setExtensionBookmarksCount(0);
+      }
+    };
+
+    check();
+    const interval = setInterval(check, 5000);
+
+    // 监听窗口聚焦和页面可见性变化，返回页面时立即刷新捕获数量
+    const handleFocus = () => {
+      check();
+    };
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleFocus);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleFocus);
+    };
+  }, [loggedInUser, xExtensionId]);
 
   /* -------------- init -------------- */
   useEffect(() => {
@@ -319,6 +550,63 @@ function App() {
     }
   };
 
+  const handleChangePassword = async () => {
+    if (!changeUsername.trim() || !changeOldPassword.trim() || !changeNewPassword.trim() || !changeConfirmPassword.trim()) {
+      setError('所有字段均不能为空');
+      return;
+    }
+    if (changeNewPassword !== changeConfirmPassword) {
+      setError('两次输入的新密码不一致');
+      return;
+    }
+    setError('');
+    setSuccessMsg('');
+    setLoading(true);
+    try {
+      const rawAccounts = await getConfig('local_accounts') || '[]';
+      let accounts;
+      try {
+        accounts = JSON.parse(rawAccounts);
+      } catch {
+        accounts = [];
+      }
+
+      const existing = accounts.find(a => a.username.trim().toLowerCase() === changeUsername.trim().toLowerCase());
+      if (!existing) {
+        setError('该用户名不存在');
+        setLoading(false);
+        return;
+      }
+
+      if (existing.password !== changeOldPassword) {
+        setError('原密码错误');
+        setLoading(false);
+        return;
+      }
+
+      // 更新密码
+      existing.password = changeNewPassword;
+      await setConfig('local_accounts', JSON.stringify(accounts));
+
+      // 同步更新本地记住的凭据
+      const savedUser = localStorage.getItem('saved_username');
+      if (savedUser && savedUser.trim().toLowerCase() === existing.username.trim().toLowerCase()) {
+        localStorage.setItem('saved_password', changeNewPassword);
+      }
+
+      setSuccessMsg('密码修改成功！请返回登录。');
+      setChangeUsername('');
+      setChangeOldPassword('');
+      setChangeNewPassword('');
+      setChangeConfirmPassword('');
+      setLoading(false);
+    } catch (err) {
+      console.error(err);
+      setError('修改密码失败: ' + err.message);
+      setLoading(false);
+    }
+  };
+
   const handleSaveInitConfig = async () => {
     if (!initProfileInput.trim()) {
       setError('GitHub 主页地址不能为空');
@@ -340,6 +628,7 @@ function App() {
       await setConfig(prefix + 'gh_token', cleanedToken);
 
       await setConfig(prefix + 'x_bookmarks_url', initXBookmarksUrl || 'https://x.com/i/bookmarks');
+      await setConfig(prefix + 'x_extension_id', initXExtensionId || '');
 
       let apis = [];
       let activeId = '';
@@ -388,6 +677,7 @@ function App() {
       // Update state at the very end
       setGithubToken(cleanedToken);
       setXBookmarksUrl(initXBookmarksUrl || 'https://x.com/i/bookmarks');
+      setXExtensionId(initXExtensionId || '');
       if (initApiKey.trim() && apis.length > 0) {
         setXApiKey(apis[0].apiKey);
         setXApiHost(apis[0].apiHost);
@@ -506,6 +796,7 @@ function App() {
       setGithubToken(cleanedToken);
 
       await setConfig(prefix + 'x_bookmarks_url', xBookmarksUrl || 'https://x.com/i/bookmarks');
+      await setConfig(prefix + 'x_extension_id', xExtensionId || '');
 
       const isNewUser = newUser !== username;
       if (isNewUser) {
@@ -627,7 +918,6 @@ function App() {
   };
 
   const handleLogout = async () => {
-    if (!confirm('确认要退出登录吗？退出后将返回登录页面。')) return;
     await setConfig('logged_in_user', '');
     localStorage.removeItem('saved_username');
     localStorage.removeItem('saved_password');
@@ -641,6 +931,11 @@ function App() {
     setXBookmarks([]);
     setCustomApis([]);
     setActiveApiId('');
+    setXExtensionId('');
+    setInitXExtensionId('');
+    setIsExtensionInstalled(false);
+    setExtensionBookmarksCount(0);
+    setShowLogoutConfirm(false);
   };
 
   /* ---- X 收藏贴静默增量刷新（无弹窗）---- */
@@ -793,6 +1088,7 @@ function App() {
     list.sort((a, b) => {
       if (sortBy === 'stars') return (b.stars || 0) - (a.stars || 0);
       if (sortBy === 'name') return (a.name || '').localeCompare(b.name || '');
+      if (sortBy === 'created') return new Date(b.createdAt) - new Date(a.createdAt);
       return new Date(b.updatedAt) - new Date(a.updatedAt);
     });
     return list;
@@ -862,58 +1158,158 @@ function App() {
           animate={{ opacity: 1, scale: 1, y: 0 }}
           className="login-card"
         >
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '2rem' }}>
-            <div className="logo-badge">
-              <Github color="#fff" size={36} />
-            </div>
-            <h1 style={{ fontSize: '2rem', fontWeight: 800, marginBottom: '0.4rem' }}>HubManager</h1>
-            <p style={{ color: 'var(--text-secondary)', textAlign: 'center' }}>
-              本地离线管理你的 GitHub & X 收藏，数据更安全
-            </p>
-          </div>
+          {isChangingPassword ? (
+            <>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '2rem' }}>
+                <div className="logo-badge" style={{ background: 'var(--accent-secondary)' }}>
+                  <User color="#fff" size={32} />
+                </div>
+                <h1 style={{ fontSize: '1.75rem', fontWeight: 800, marginTop: '0.5rem', marginBottom: '0.4rem' }}>修改本地密码</h1>
+                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: '0.9rem' }}>
+                  更新保存在此浏览器中的离线账号密码
+                </p>
+              </div>
 
-          <label className="label-text">本地账号用户名</label>
-          <input
-            type="text"
-            placeholder="请输入用户名（新账号将自动注册）"
-            value={loginUsername}
-            onChange={(e) => setLoginUsername(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleLoginRegister()}
-          />
+              <label className="label-text">本地账号用户名</label>
+              <input
+                type="text"
+                placeholder="请输入用户名"
+                value={changeUsername}
+                onChange={(e) => setChangeUsername(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleChangePassword()}
+              />
 
-          <label className="label-text" style={{ marginTop: '1rem' }}>密码</label>
-          <input
-            type="password"
-            placeholder="请输入密码"
-            value={loginPassword}
-            onChange={(e) => setLoginPassword(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleLoginRegister()}
-          />
+              <label className="label-text" style={{ marginTop: '1rem' }}>原密码</label>
+              <input
+                type="password"
+                placeholder="请输入原密码"
+                value={changeOldPassword}
+                onChange={(e) => setChangeOldPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleChangePassword()}
+              />
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '1rem', marginBottom: '1.25rem' }}>
-            <input
-              type="checkbox"
-              id="rememberPassword"
-              checked={rememberPassword}
-              onChange={(e) => setRememberPassword(e.target.checked)}
-              style={{ width: 'auto', cursor: 'pointer' }}
-            />
-            <label htmlFor="rememberPassword" style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', cursor: 'pointer', userSelect: 'none' }}>
-              记住密码
-            </label>
-          </div>
+              <label className="label-text" style={{ marginTop: '1rem' }}>新密码</label>
+              <input
+                type="password"
+                placeholder="请输入新密码"
+                value={changeNewPassword}
+                onChange={(e) => setChangeNewPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleChangePassword()}
+              />
 
-          <button onClick={handleLoginRegister} disabled={loading} style={{ height: '3.2rem', fontSize: '1rem' }}>
-            {loading ? '正在验证…' : '登录 / 注册'}
-          </button>
-          {error && (
-            <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="error-box">
-              {error}
-            </motion.p>
+              <label className="label-text" style={{ marginTop: '1rem' }}>确认新密码</label>
+              <input
+                type="password"
+                placeholder="请再次输入新密码"
+                value={changeConfirmPassword}
+                onChange={(e) => setChangeConfirmPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleChangePassword()}
+              />
+
+              <button onClick={handleChangePassword} disabled={loading} style={{ height: '3.2rem', fontSize: '1rem', marginTop: '1.5rem' }}>
+                {loading ? '正在处理…' : '确认修改密码'}
+              </button>
+
+              {successMsg && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="success-box" style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.2)', padding: '0.75rem', borderRadius: '8px', fontSize: '0.88rem', marginTop: '1rem', textAlign: 'center' }}>
+                  {successMsg}
+                </motion.p>
+              )}
+
+              {error && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="error-box" style={{ marginTop: '1rem' }}>
+                  {error}
+                </motion.p>
+              )}
+
+              <div style={{ textAlign: 'center', marginTop: '1.5rem' }}>
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setIsChangingPassword(false);
+                    setError('');
+                    setSuccessMsg('');
+                  }}
+                  style={{ color: 'var(--accent-primary)', fontSize: '0.88rem', textDecoration: 'none' }}
+                >
+                  返回登录
+                </a>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '2rem' }}>
+                <div className="logo-badge">
+                  <Github color="#fff" size={36} />
+                </div>
+                <h1 style={{ fontSize: '2rem', fontWeight: 800, marginBottom: '0.4rem' }}>HubManager</h1>
+                <p style={{ color: 'var(--text-secondary)', textAlign: 'center' }}>
+                  本地离线管理你的 GitHub & X 收藏，数据更安全
+                </p>
+              </div>
+
+              <label className="label-text">本地账号用户名</label>
+              <input
+                type="text"
+                placeholder="请输入用户名（新账号将自动注册）"
+                value={loginUsername}
+                onChange={(e) => setLoginUsername(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleLoginRegister()}
+              />
+
+              <label className="label-text" style={{ marginTop: '1rem' }}>密码</label>
+              <input
+                type="password"
+                placeholder="请输入密码"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleLoginRegister()}
+              />
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '1rem', marginBottom: '1.25rem' }}>
+                <input
+                  type="checkbox"
+                  id="rememberPassword"
+                  checked={rememberPassword}
+                  onChange={(e) => setRememberPassword(e.target.checked)}
+                  style={{ width: 'auto', cursor: 'pointer' }}
+                />
+                <label htmlFor="rememberPassword" style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', cursor: 'pointer', userSelect: 'none' }}>
+                  记住密码
+                </label>
+              </div>
+
+              <button onClick={handleLoginRegister} disabled={loading} style={{ height: '3.2rem', fontSize: '1rem' }}>
+                {loading ? '正在验证…' : '登录 / 注册'}
+              </button>
+
+              {error && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="error-box">
+                  {error}
+                </motion.p>
+              )}
+
+              <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '1.2rem', textAlign: 'center' }}>
+                提示：首次输入新账号与密码即为注册，所有数据加密存放在当前浏览器中。
+              </p>
+
+              <div style={{ textAlign: 'center', marginTop: '1.2rem', borderTop: '1px solid var(--border-strong)', paddingTop: '1rem' }}>
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setIsChangingPassword(true);
+                    setError('');
+                    setSuccessMsg('');
+                  }}
+                  style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', textDecoration: 'none' }}
+                >
+                  修改本地账号密码
+                </a>
+              </div>
+            </>
           )}
-          <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '1.2rem', textAlign: 'center' }}>
-            提示：首次输入新账号与密码即为注册，所有数据加密存放在当前浏览器中。
-          </p>
         </motion.div>
       </div>
     );
@@ -955,6 +1351,57 @@ function App() {
               value={initXBookmarksUrl}
               onChange={(e) => setInitXBookmarksUrl(e.target.value)}
             />
+
+            {/* Chrome Extension Guide in Onboarding */}
+            <div style={{ borderTop: '1px solid var(--border-strong)', marginTop: '1.25rem', paddingTop: '1rem' }}>
+              <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--accent-primary)' }}>关联 X 助手浏览器插件（推荐，可稍后配置）</h3>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginBottom: '0.75rem', lineHeight: '1.45' }}>
+                支持在 X 平台浏览收藏时自动捕获推特，并一键导入。
+              </p>
+              
+              <div style={{ background: 'rgba(0, 0, 0, 0.2)', padding: '0.75rem', borderRadius: '8px', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '0.75rem', border: '1px dashed var(--border-card)' }}>
+                <ol style={{ paddingLeft: '1.1rem', margin: 0 }}>
+                  <li>打开 <code style={{ color: 'var(--accent-orange)' }}>chrome://extensions/</code>，开启<strong>“开发者模式”</strong>。</li>
+                  <li>选择<strong>“加载已解压的扩展程序”</strong>，载入项目下的 <code style={{ color: 'var(--accent-primary)' }}>x-extension</code>。</li>
+                  <li>复制其“ID”并填入下方，点击测试连接。</li>
+                </ol>
+              </div>
+
+              <label className="label-text">插件 ID</label>
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                <input
+                  type="text"
+                  placeholder="未安装可直接留空，点击跳过"
+                  value={initXExtensionId}
+                  onChange={(e) => setInitXExtensionId(e.target.value)}
+                  style={{ flex: 1, margin: 0 }}
+                />
+                <button
+                  type="button"
+                  onClick={handleTestOnboardingExtension}
+                  disabled={onboardingPingLoading}
+                  style={{
+                    width: 'auto',
+                    padding: '0 1rem',
+                    background: 'rgba(255, 255, 255, 0.08)',
+                    border: '1px solid rgba(255, 255, 255, 0.15)',
+                    fontSize: '0.82rem',
+                    height: '2.8rem'
+                  }}
+                >
+                  {onboardingPingLoading ? '检测中…' : '测试连接'}
+                </button>
+              </div>
+              {onboardingPingResult && (
+                <p style={{
+                  fontSize: '0.8rem',
+                  color: onboardingPingResult.success ? '#10b981' : '#f59e0b',
+                  margin: '0 0 0.5rem 0'
+                }}>
+                  {onboardingPingResult.message}
+                </p>
+              )}
+            </div>
 
             <div style={{ borderTop: '1px solid var(--border-strong)', marginTop: '1.25rem', paddingTop: '1rem' }}>
               <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--accent-primary)' }}>配置首个大模型 API（用于 AI 整理，可选）</h3>
@@ -1021,7 +1468,7 @@ function App() {
           </div>
           <div>
             <div style={{ fontSize: '1.05rem', fontWeight: 700 }}>HubManager</div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>GitHub 资产管理</div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>数字资产管理</div>
           </div>
         </div>
 
@@ -1252,7 +1699,7 @@ function App() {
           </div>
           <div
             className="nav-item danger"
-            onClick={handleLogout}
+            onClick={() => setShowLogoutConfirm(true)}
             style={{ flex: 1, justifyContent: 'center', marginBottom: 0, padding: '0.6rem 0.5rem', fontSize: '0.85rem', gap: '0.4rem' }}
           >
             <LogOut size={16} /> 退出登录
@@ -1336,6 +1783,7 @@ function App() {
 
               <select className="filter-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
                 <option value="updated">按最近更新</option>
+                <option value="created">按最近创建</option>
                 <option value="stars">按星标数</option>
                 <option value="name">按名称</option>
               </select>
@@ -1355,6 +1803,162 @@ function App() {
           </>
         ) : currentView === 'x-bookmarks' ? (
           <>
+            {/* X Extension Sync Banner */}
+            <div className="x-sync-banner" style={{
+              background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.8))',
+              border: '1px solid var(--border-strong)',
+              borderRadius: '16px',
+              padding: '1.25rem 1.5rem',
+              marginBottom: '1.5rem',
+              backdropFilter: 'blur(8px)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1rem',
+              boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div style={{
+                    width: '10px',
+                    height: '10px',
+                    borderRadius: '50%',
+                    backgroundColor: isExtensionInstalled ? '#10b981' : '#f59e0b',
+                    boxShadow: isExtensionInstalled ? '0 0 8px #10b981' : '0 0 8px #f59e0b'
+                  }} />
+                  <span style={{ fontWeight: 600, fontSize: '0.95rem', color: '#fff' }}>
+                    {isExtensionInstalled ? 'X 助手插件已联机' : 'X 助手插件未联机'}
+                  </span>
+                  {isExtensionInstalled && (
+                    <span className="badge badge-plain" style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', borderColor: 'rgba(16, 185, 129, 0.2)' }}>
+                      v1.0.0
+                    </span>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  {isExtensionInstalled ? (
+                    <>
+                      <motion.button
+                        onClick={handleSyncExtensionBookmarks}
+                        disabled={loading}
+                        animate={extensionBookmarksCount > 0 ? {
+                          scale: [1, 1.02, 1],
+                          boxShadow: [
+                            '0 2px 10px rgba(99, 102, 241, 0.3)',
+                            '0 2px 20px rgba(99, 102, 241, 0.6)',
+                            '0 2px 10px rgba(99, 102, 241, 0.3)'
+                          ]
+                        } : {}}
+                        transition={extensionBookmarksCount > 0 ? {
+                          repeat: Infinity,
+                          duration: 2,
+                          ease: "easeInOut"
+                        } : {}}
+                        style={{
+                          background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
+                          color: '#fff',
+                          border: '1px solid transparent',
+                          padding: '0.6rem 1.25rem',
+                          borderRadius: '8px',
+                          fontWeight: 600,
+                          fontSize: '0.88rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '0.5rem',
+                          boxShadow: '0 2px 10px rgba(99, 102, 241, 0.3)',
+                          cursor: 'pointer',
+                          width: 'auto',
+                          height: '2.4rem'
+                        }}
+                      >
+                        <RefreshCw size={15} className={loading ? 'spin' : ''} />
+                        一键同步已捕获书签 ({extensionBookmarksCount})
+                      </motion.button>
+                      <button
+                        onClick={() => setShowXImportModal(true)}
+                        style={{
+                          background: 'rgba(255, 255, 255, 0.08)',
+                          color: '#cbd5e1',
+                          border: '1px solid rgba(255, 255, 255, 0.1)',
+                          padding: '0.6rem 1.25rem',
+                          borderRadius: '8px',
+                          fontWeight: 600,
+                          fontSize: '0.88rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                          width: 'auto',
+                          height: '2.4rem'
+                        }}
+                      >
+                        手动粘贴导入
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => setShowXImportModal(true)}
+                      style={{
+                        background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
+                        color: '#fff',
+                        border: '1px solid transparent',
+                        padding: '0.6rem 1.25rem',
+                        borderRadius: '8px',
+                        fontWeight: 600,
+                        fontSize: '0.88rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        width: 'auto',
+                        height: '2.4rem'
+                      }}
+                    >
+                      手动粘贴导入 (跳过插件)
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {!isExtensionInstalled && (
+                <div style={{
+                  fontSize: '0.85rem',
+                  color: 'var(--text-secondary)',
+                  lineHeight: '1.6',
+                  borderTop: '1px solid rgba(255, 255, 255, 0.05)',
+                  paddingTop: '0.75rem',
+                  display: 'grid',
+                  gridTemplateColumns: '1fr',
+                  gap: '0.5rem'
+                }}>
+                  <div style={{ fontWeight: 600, color: '#fff', marginBottom: '0.25rem' }}>💡 推荐：安装本地 Chrome 扩展程序，在 X 平台滚动即可自动捕获书签：</div>
+                  <ol style={{ paddingLeft: '1.2rem', margin: 0 }}>
+                    <li>打开 Chrome 浏览器，访问 <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px', color: 'var(--accent-orange)' }}>chrome://extensions/</code>，在右上角开启<strong>“开发者模式”</strong>。</li>
+                    <li>点击左上角<strong>“加载已解压的扩展程序”</strong>，选择项目根目录下的 <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px', color: 'var(--accent-primary)' }}>x-extension</code> 文件夹。</li>
+                    <li>复制生成的扩展程序 ID，在<strong>“设置”</strong>中绑定插件 ID，即可在此联机并一键同步！</li>
+                  </ol>
+                </div>
+              )}
+
+              {isExtensionInstalled && extensionBookmarksCount > 0 && (
+                <div style={{
+                  fontSize: '0.85rem',
+                  color: '#10b981',
+                  background: 'rgba(16, 185, 129, 0.06)',
+                  border: '1px dashed rgba(16, 185, 129, 0.2)',
+                  borderRadius: '8px',
+                  padding: '0.6rem 1rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem'
+                }}>
+                  <Sparkles size={14} />
+                  <span>已捕获到 <strong>{extensionBookmarksCount}</strong> 条未同步书签，点击上方“一键同步”按钮即可导入 IndexedDB 数据库并自动分类。</span>
+                </div>
+              )}
+            </div>
+
             <div className="controls-bar">
               <div className="search-wrapper">
                 <Search size={18} className="search-icon" />
@@ -1445,7 +2049,41 @@ function App() {
                   value={xBookmarksUrl}
                   onChange={(e) => setXBookmarksUrl(e.target.value)}
                   placeholder="例如：https://x.com/i/bookmarks"
+                  style={{ marginBottom: '0.75rem' }}
                 />
+
+                <label className="label-text">X 助手插件 ID</label>
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                  <input
+                    value={xExtensionId}
+                    onChange={(e) => setXExtensionId(e.target.value)}
+                    placeholder="输入你在 chrome://extensions 复制 of ID"
+                    style={{ flex: 1, margin: 0 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleTestSettingsExtension}
+                    style={{
+                      width: 'auto',
+                      padding: '0 1rem',
+                      background: 'rgba(255, 255, 255, 0.08)',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      fontSize: '0.85rem',
+                      height: '2.8rem'
+                    }}
+                  >
+                    测试连接
+                  </button>
+                </div>
+                {settingsPingResult && (
+                  <p style={{
+                    fontSize: '0.8rem',
+                    color: settingsPingResult.success ? '#10b981' : '#f59e0b',
+                    margin: '0 0 0.5rem 0'
+                  }}>
+                    {settingsPingResult.message}
+                  </p>
+                )}
               </div>
 
               <div style={{ borderTop: '1px solid var(--border-strong)', marginTop: '1rem', paddingTop: '1rem' }}>
@@ -1574,10 +2212,47 @@ function App() {
 
               <button
                 style={{ marginTop: '0.75rem', background: 'transparent', border: '1px solid rgba(239,68,68,0.4)', color: '#ef4444' }}
-                onClick={() => { setShowSettings(false); handleLogout(); }}
+                onClick={() => { setShowSettings(false); setShowLogoutConfirm(true); }}
               >
                 退出登录
               </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showLogoutConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="modal-overlay" onClick={() => setShowLogoutConfirm(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 20 }}
+              className="modal-content" style={{ maxWidth: 400, textAlign: 'center', padding: '2.5rem 2rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.25rem' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', padding: '1rem', borderRadius: '50%', display: 'inline-flex', color: '#ef4444' }}>
+                <LogOut size={28} />
+              </div>
+              <div>
+                <h3 style={{ fontSize: '1.3rem', fontWeight: 700, color: '#fff', marginBottom: '0.5rem' }}>确认退出登录</h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: 1.5 }}>您确定要退出当前账户吗？<br />退出后将返回登录页面。</p>
+              </div>
+              <div style={{ display: 'flex', gap: '0.75rem', width: '100%', marginTop: '0.5rem' }}>
+                <button
+                  onClick={() => setShowLogoutConfirm(false)}
+                  style={{ flex: 1, background: 'rgba(255, 255, 255, 0.08)', color: '#cbd5e1', border: '1px solid rgba(255, 255, 255, 0.1)', height: '2.8rem', borderRadius: '10px', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleLogout}
+                  style={{ flex: 1, background: 'linear-gradient(135deg, #ef4444, #b91c1c)', color: '#fff', border: 'none', height: '2.8rem', borderRadius: '10px', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer', boxShadow: '0 4px 12px rgba(239, 68, 68, 0.2)' }}
+                >
+                  确定退出
+                </button>
+              </div>
             </motion.div>
           </motion.div>
         )}
@@ -1901,6 +2576,23 @@ const XImportModal = ({
   );
 };
 
+const getTweetUrl = (bookmark) => {
+  const username = bookmark.blogger ? bookmark.blogger.replace(/^@/, '') : '';
+  if (bookmark.id && bookmark.id.startsWith('x-helper-') && username && username !== 'unknown') {
+    const statusId = bookmark.id.replace('x-helper-', '');
+    return `https://x.com/${username}/status/${statusId}`;
+  }
+  const statusUrlRegex = /https?:\/\/(?:twitter|x)\.com\/[a-zA-Z0-9_]+\/status\/(\d+)/i;
+  const match = bookmark.rawText?.match(statusUrlRegex);
+  if (match) {
+    return match[0];
+  }
+  if (username && username !== 'unknown') {
+    return `https://x.com/${username}`;
+  }
+  return 'https://x.com';
+};
+
 const XBookmarkCard = ({ bookmark, index, onDelete }) => {
   // Generate random gradient avatar based on blogger handle
   const avatarBg = useMemo(() => {
@@ -1923,6 +2615,7 @@ const XBookmarkCard = ({ bookmark, index, onDelete }) => {
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: Math.min(index * 0.02, 0.3) }}
       className="repo-card x-card"
+      onClick={() => window.open(getTweetUrl(bookmark), '_blank')}
     >
       <div className="card-top" style={{ justifyContent: 'space-between', width: '100%' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', minWidth: 0 }}>
@@ -1979,16 +2672,6 @@ const XBookmarkCard = ({ bookmark, index, onDelete }) => {
           ))}
         </ul>
       </div>
-
-      {/* Expandable details block with raw tweet text */}
-      <details className="x-raw-details" style={{ marginTop: '0.5rem', marginBottom: '0.5rem', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '8px', padding: '0.4rem 0.6rem', background: 'rgba(0,0,0,0.15)' }} onClick={(e) => e.stopPropagation()}>
-        <summary style={{ cursor: 'pointer', fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 500, userSelect: 'none' }}>
-          显示原始推文
-        </summary>
-        <div className="x-raw-text" style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '0.4rem', whiteSpace: 'pre-wrap', lineHeight: '1.55', borderTop: '1px dashed rgba(255,255,255,0.05)', paddingTop: '0.4rem', maxHeight: '150px', overflowY: 'auto' }}>
-          {bookmark.rawText}
-        </div>
-      </details>
 
       <div className="badge-container" style={{ marginTop: 'auto', paddingTop: '0.5rem' }}>
         {bookmark.tags && bookmark.tags.map((tag) => (

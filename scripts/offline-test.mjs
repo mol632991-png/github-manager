@@ -4,7 +4,7 @@
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseXBookmarks } from '../src/utils/xParser.js';
+import { parseXBookmarks, parseGraphQLRawBookmarks } from '../src/utils/xParser.js';
 
 // ---- axios stub: github.js 只用 axios.get，网络部分在此测试中不会被调用 ----
 // 我们通过一个空对象占位；直接 import 时只要模块顶层不调用就不会出错。
@@ -301,6 +301,93 @@ t('第三篇不应包含 "Next Display Name" (防止显示名称泄漏)', () => 
   eq(parsedReplyLeak[2].blogger, '@user-c');
 });
 t('第四篇博主为 @user-d', () => eq(parsedReplyLeak[3].blogger, '@user-d'));
+
+console.log('\n[11] parseGraphQLRawBookmarks GraphQL 格式解析测试');
+const mockGraphQLTweets = [
+  {
+    rest_id: '123456789',
+    core: {
+      user_results: {
+        result: {
+          legacy: {
+            screen_name: 'test_user'
+          }
+        }
+      }
+    },
+    legacy: {
+      full_text: 'This is a test tweet for GraphQL parsing with llm and gpt.',
+      created_at: 'Fri May 22 13:00:00 +0000 2026'
+    }
+  },
+  {
+    rest_id: 'nest_user_1',
+    core: {
+      user_results: {
+        result: {
+          user: {
+            legacy: {
+              screen_name: 'nested_user'
+            }
+          }
+        }
+      }
+    },
+    legacy: {
+      full_text: 'Test nested legacy structure.',
+      created_at: 'Fri May 22 13:00:00 +0000 2026'
+    }
+  },
+  {
+    rest_id: 'author_user_1',
+    author: {
+      screen_name: 'author_user'
+    },
+    legacy: {
+      full_text: 'Test author key structure.',
+      created_at: 'Fri May 22 13:00:00 +0000 2026'
+    }
+  },
+  {
+    rest_id: 'deep_user_1',
+    core: {
+      something_else: {
+        some_nested_key: {
+          screen_name: 'deep_searched_user'
+        }
+      }
+    },
+    legacy: {
+      full_text: 'Test deep search key structure.',
+      created_at: 'Fri May 22 13:00:00 +0000 2026'
+    }
+  },
+  {
+    rest_id: 'unavailable_user_1',
+    core: {
+      user_results: {
+        result: {
+          __typename: 'UserUnavailable'
+        }
+      }
+    },
+    legacy: {
+      full_text: 'Test unavailable user structure (fallback to @unknown).',
+      created_at: 'Fri May 22 13:00:00 +0000 2026'
+    }
+  }
+];
+const parsedGraphQL = parseGraphQLRawBookmarks(mockGraphQLTweets);
+t('解析出的 GraphQL 帖文数量为 5', () => eq(parsedGraphQL.length, 5));
+t('博主 1 为 @test_user', () => eq(parsedGraphQL[0].blogger, '@test_user'));
+t('ID 为 x-helper-123456789', () => eq(parsedGraphQL[0].id, 'x-helper-123456789'));
+t('包含 AI 与大模型相关的标签', () => truthy(parsedGraphQL[0].tags.includes('大模型')));
+t('发布日期解析正确', () => eq(parsedGraphQL[0].publishDate, '2026-05-22'));
+
+t('博主 2 为 @nested_user (支持 result.user.legacy)', () => eq(parsedGraphQL[1].blogger, '@nested_user'));
+t('博主 3 为 @author_user (支持 author.screen_name)', () => eq(parsedGraphQL[2].blogger, '@author_user'));
+t('博主 4 为 @deep_searched_user (支持深度搜索)', () => eq(parsedGraphQL[3].blogger, '@deep_searched_user'));
+t('博主 5 为 @unknown (支持账户封禁/不可用时降级)', () => eq(parsedGraphQL[4].blogger, '@unknown'));
 
 console.log(`\n===================================`);
 console.log(`通过 ${pass} 项，失败 ${fail} 项`);

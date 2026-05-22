@@ -486,7 +486,14 @@ export const aiExtractXBookmarks = async (rawText, apiKey, apiModel = 'deepseek-
     throw new Error('请先在“设置”中配置 API 密钥');
   }
   
-  const endpoint = `${apiHost.replace(/\/+$/, '')}/v1/chat/completions`;
+  let endpoint = apiHost.replace(/\/+$/, '');
+  if (!endpoint.includes('/chat/completions')) {
+    if (endpoint.endsWith('/v1')) {
+      endpoint = `${endpoint}/chat/completions`;
+    } else {
+      endpoint = `${endpoint}/v1/chat/completions`;
+    }
+  }
   const systemPrompt = `你是一个智能信息提取器。
 请将以下用户收藏的 X 帖子文本解析并整理为 JSON 格式的卡片清单。帖子可能包含多个，它们之间通常通过作者、@用户名和时间（如 @username · 5月20日）进行分割。
 每个卡片需要提取并生成以下字段：
@@ -539,3 +546,114 @@ export const aiExtractXBookmarks = async (rawText, apiKey, apiModel = 'deepseek-
     throw new Error('AI 提取格式解析失败，请检查网络或重试。提示：' + e.message, { cause: e });
   }
 };
+
+/**
+ * 优先在标准嵌套对象中深层搜索 screen_name 字段，排除了引用贴和转发贴的干扰
+ */
+const findScreenNameDeep = (obj, seen = new WeakSet()) => {
+  if (!obj || typeof obj !== 'object') return null;
+  if (seen.has(obj)) return null;
+  seen.add(obj);
+
+  if (obj.screen_name && typeof obj.screen_name === 'string' && obj.screen_name.trim()) {
+    return obj.screen_name.trim();
+  }
+
+  const keys = Object.keys(obj);
+  const priorityKeys = ['core', 'user_results', 'result', 'user', 'legacy'];
+  const otherKeys = keys.filter(k => !priorityKeys.includes(k) && k !== 'quoted_status_result' && k !== 'retweeted_status_result');
+
+  for (const key of priorityKeys) {
+    if (obj[key] && typeof obj[key] === 'object') {
+      const found = findScreenNameDeep(obj[key], seen);
+      if (found) return found;
+    }
+  }
+
+  for (const key of otherKeys) {
+    if (obj[key] && typeof obj[key] === 'object') {
+      const found = findScreenNameDeep(obj[key], seen);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
+/**
+ * 从 GraphQL 推文节点中提取博主的用户名
+ */
+const extractScreenName = (item) => {
+  if (!item || typeof item !== 'object') return null;
+
+  // 1. 尝试常见的标准路径（直接获取，避免深搜开销）
+  const paths = [
+    item.core?.user_results?.result?.legacy?.screen_name,
+    item.core?.user_results?.result?.user?.legacy?.screen_name,
+    item.user_results?.result?.legacy?.screen_name,
+    item.user_results?.result?.user?.legacy?.screen_name,
+    item.author?.legacy?.screen_name,
+    item.author?.screen_name
+  ];
+
+  for (const val of paths) {
+    if (val && typeof val === 'string' && val.trim()) {
+      return val.trim();
+    }
+  }
+
+  // 2. 降级：执行安全的深层搜索
+  const searchContainers = [item.core, item.user_results, item.author, item].filter(Boolean);
+  for (const container of searchContainers) {
+    const found = findScreenNameDeep(container);
+    if (found) return found;
+  }
+
+  return null;
+};
+
+/**
+ * 将浏览器插件收集来的原始 GraphQL 格式推特列表，转换为系统内部使用的书签格式
+ * @param {Array} rawTweets 
+ * @returns {Array} 结构化后的书签列表
+ */
+export const parseGraphQLRawBookmarks = (rawTweets) => {
+  if (!Array.isArray(rawTweets)) return [];
+  
+  return rawTweets.map(item => {
+    try {
+      const restId = item.rest_id;
+      const tweetData = item.legacy;
+      
+      // 仅在完全没有推文正文/元数据时过滤该条目
+      if (!tweetData) return null;
+      
+      const rawText = tweetData.full_text || '';
+      
+      // 使用更鲁棒的用户名提取器
+      const screenName = extractScreenName(item);
+      const blogger = screenName ? `@${screenName}` : '@unknown';
+      
+      const publishDate = tweetData.created_at 
+        ? new Date(tweetData.created_at).toISOString().split('T')[0] 
+        : new Date().toISOString().split('T')[0];
+      
+      const text = rawText.trim();
+      const classification = classifyText(text); // 复用已有的 classifyText 进行启发式分类
+      
+      return {
+        id: `x-helper-${restId}`,
+        blogger,
+        publishDate,
+        rawText: text,
+        theme: classification.theme,
+        tags: classification.tags,
+        coreContent: classification.coreContent,
+        helpsWith: classification.helpsWith,
+      };
+    } catch (e) {
+      console.error('解析单条 GraphQL 推文失败:', e);
+      return null;
+    }
+  }).filter(Boolean);
+};
+

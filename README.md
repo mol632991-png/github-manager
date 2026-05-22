@@ -1,154 +1,158 @@
-# HubManager · 中文化的 GitHub 资产管理工具
+<div align="center">
 
-> 粘贴一次 GitHub 主页地址，HubManager 自动帮你把**个人仓库**和**星标项目**整理成中文卡片，按**技术用途**和**使用场景**两个维度分类，并以**时间线**呈现所有项目的最新更新。
+# 🧠 HubManager · 数字资产管理中心
 
----
+**把你在 GitHub 收藏的项目 和 X(Twitter) 里收藏的技术干货，统一整理成一张中文知识库。**
 
-## 这是什么 / 为什么做它
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org)
+[![Tests](https://img.shields.io/badge/tests-82%20passing-brightgreen)](#测试)
+[![React](https://img.shields.io/badge/React-19-61dafb)](https://react.dev)
+[![Vite](https://img.shields.io/badge/Vite-8-646cff)](https://vitejs.dev)
 
-GitHub 原生 UI 里：
-- 个人仓库和星标项目只能按时间或字母排序，很难找。
-- 描述大多是英文，刷下来需要脑补每个项目到底能帮我做什么。
-- 想知道最近某个关注项目有没有更新，必须一个一个点进去看。
-
-**HubManager 把这些痛点一次性解决：**
-
-| 能力 | 说明 |
-|---|---|
-| 🗂 **两种分类并行** | **按用途**（AI / Web / CLI / DevOps …）和**按场景**（金融 / 大模型开发 / 音乐 / 小说 / 办公 …），同一个项目从两个角度都能找到 |
-| 🈲 **中文卡片** | 每张卡片包含**项目名称、作者、功能介绍、使用指南**，使用指南会根据分类 + 语言生成针对性的上手步骤 |
-| 🕒 **时间线更新日志** | 按天分组展示最近的版本发布和代码提交，支持按「自有 / 星标 / 版本 / 提交」过滤 |
-| ⚡ **增量刷新** | 再次同步时只拉取**上次之后**变更的项目，不再全量扫描，显著降低 GitHub API 用量 |
-| 🔒 **本地优先** | 所有数据和可选 Token 仅保存在浏览器 IndexedDB，不上传任何服务器 |
+</div>
 
 ---
 
-## 功能亮点
+## 📖 为什么做这个工具
 
-### 1. 双维度分类
+作为一个重度 GitHub 用户，你是否有过这些困扰：
 
-每个项目会同时得到两个标签：
+- ⭐ **Star 了上千个项目，再也找不回来** —— 它们按时间堆在一起，三个月前收藏的那个工具叫什么名字？
+- 🌐 **描述全是英文** —— 刷下来要脑补每个项目到底能帮我做什么，好累
+- 🐦 **X(Twitter) 收藏夹里塞满了技术帖** —— 想回头查某篇关于 AI Agent 的讨论，根本翻不到
+- 🔖 **两条信息流完全割裂** —— GitHub 的代码工具 和 X 上的最新观点分散在不同地方
 
-- **category（技术用途）** — 10 类：AI 与大模型、Web 应用与站点、移动与桌面应用、命令行与工具软件、开发框架与 SDK、数据与后端服务、DevOps 与运维、学习资源与清单、游戏与创意、其他实用项目
-- **scenario（使用场景）** — 15 类：金融投资、AI 技能与插件、大模型开发、游戏娱乐、音乐与音频、图像与视频、写作与小说、办公与效率、学习与教育、数据分析、安全与隐私、网络与爬虫、生活工具、开发者辅助、其他场景
+**HubManager 把这三件事一次性解决：**
 
-**举例：** LangChain 的 category 是 `AI 与大模型`，scenario 是 `大模型开发`；一个 Cursor MCP 仓库的 category 是 `AI 与大模型`，scenario 是 `AI 技能与插件`。左侧栏顶部的「按用途 / 按场景」Tab 可随时切换视角。
-
-### 2. 中文项目卡片
-
-- **项目名称 / 作者 / 头像**
-- **功能介绍**：原始 description；空时基于分类、语言、场景自动兜底
-- **使用指南**：结合语言（JS/Python/Go/Rust 等）给出具体的上手命令
-- 徽章：用途、场景（粉色）、语言、Star 数、归档/Fork 状态
-
-点卡片进入详情页：功能介绍、使用指南、**能帮到你的 2–4 条具体价值**、相关主题、README 预览。
-
-### 3. 时间线式的更新日志
-
-- 按日期分组（今天 / 昨天 / 具体日期）
-- 每条带左侧节点，版本发布和代码提交用不同颜色
-- 顶部过滤：「全部 / 自有 / 星标」×「全部 / 版本发布 / 代码提交」
-
-### 4. 增量刷新
-
-- 首次同步：全量拉取 + 全量动态
-- 之后点「增量刷新」：
-  - repos 按 `updated_at` 倒序翻页，遇到早于上次同步时间的条目立即截断
-  - starred 按 `starred_at` 倒序翻页（`star+json` accept），同样截断
-  - 动态只保留新的 release / commit
-- 每个用户独立维护 `lastSync:<username>`，切换账号互不影响
-
-### 5. 筛选与搜索
-
-控件栏组合筛选：来源（自有/星标）× 用途 × 场景 × 语言 × 关键字，排序支持最近更新 / 星标数 / 名称。
+> 🔥 把你的 GitHub 项目按用途和场景**自动分类** → 生成**中文功能卡片** → 同时整理 X 收藏贴的**技术内容** → 一个界面，掌握你的全部数字资产
 
 ---
 
-## 快速开始
+## ✨ 核心功能
 
-### 使用者视角（浏览器中）
+### 📁 GitHub 项目库 — 告别星标坟墓
 
-1. 启动应用，进入欢迎页
-2. 在「GitHub 主页地址」栏粘贴如 `https://github.com/torvalds`（也支持 `@torvalds`、裸用户名、带参数的 URL）
-3. 如果是中大规模账号，建议展开「可选」填一个 **Personal Access Token** 以提高 API 限额（无需任何权限，公共范围 read 即可）
-4. 点击「开始整理我的 GitHub」，稍等数秒
-5. 之后任何时候，点侧边栏「增量刷新」即可更新
+粘贴你的 GitHub 主页地址，HubManager 自动完成全部工作：
 
-> ⚠️ 匿名调用 GitHub API 每小时只有 60 次；登录 Token 后每小时 5000 次。大号务必填 Token。
+| 功能 | 说明 |
+|------|------|
+| 🗂 **双维度智能分类** | **按用途**（AI / Web / CLI / DevOps 等 10 类）+ **按场景**（金融 / 大模型开发 / 写作 / 办公等 15 类），同一个项目两个角度都能找到 |
+| 🀄 **全中文卡片** | 自动生成中文功能介绍 + 针对性的上手指南，看懂一个项目不需要再查文档 |
+| 🔍 **多维度筛选** | 按来源（自有/星标）× 用途 × 场景 × 语言 × 关键词自由组合，秒找目标 |
+| ⚡ **增量同步** | 再次同步只拉取上次之后的变更，API 用量极低 |
+| 📅 **时间线更新日志** | 按天追踪你关注项目的版本发布和最新提交 |
+| 🔒 **本地优先** | 所有数据只存在你浏览器的 IndexedDB，不上传任何服务器 |
 
-### 开发者视角（本地运行）
+**示例：** `langchain` → 自动标注 `AI 与大模型 · 大模型开发`；`cursor-mcp` → 自动标注 `AI 与大模型 · AI 技能与插件`；`awesome-python` → `学习资源与清单 · 学习与教育`
+
+---
+
+### 🐦 X 收藏贴整理 — 让技术干货不再沉没
+
+通过配套的 **X 助手浏览器插件**，自动捕获你在 X(Twitter) 收藏夹里的帖子，整理成结构化知识卡片：
+
+| 功能 | 说明 |
+|------|------|
+| 🪄 **自动提取博主信息** | 自动识别博主用户名 + 认证状态，无需手动录入 |
+| 📝 **核心内容提炼** | 从长帖中提取关键观点，过滤掉转推次数、点赞数等噪音行 |
+| 🏷 **智能打标签** | 根据内容自动生成话题标签（如 `#AI Agent` `#大模型` `#DeepSeek`） |
+| 🔎 **多维筛选** | 按博主、标签、月份、时间排序自由过滤 |
+| ✋ **手动粘贴兜底** | 不想装插件？直接把推文原文粘贴进来也能解析 |
+| 🤖 **AI 增强提取**（可选）| 配置 DeepSeek / OpenAI 等大模型 API，让解析更精准 |
+
+**插件工作方式**：在你正常浏览 `x.com/i/bookmarks` 时，插件在后台静默拦截数据，无需额外操作。
+
+---
+
+## 🚀 快速开始
+
+### 第一步：启动 HubManager
 
 ```bash
-# 克隆仓库
+# 克隆项目
 git clone https://github.com/mol632991-png/github-manager.git
 cd github-manager
 
-# 安装依赖并启动
+# 安装依赖
 npm install
-npm run dev            # 开发模式，默认 http://localhost:5173
 
-# 其他命令
-npm run build          # 生产构建，产物在 dist/
-npm run preview        # 预览已构建的产物
-npm test               # 运行离线业务逻辑单测（46 项，不需要网络）
-npm run lint           # ESLint 检查
+# 启动（默认 http://localhost:5173）
+npm run dev
 ```
 
-环境要求：Node.js ≥ 18（开发用的是 Node 22/24）。
+**环境要求**：Node.js ≥ 18
+
+### 第二步：同步你的 GitHub 项目
+
+1. 打开应用，进入欢迎页
+2. 在「GitHub 主页地址」栏粘贴任意格式：
+   - `https://github.com/torvalds`
+   - `@torvalds`
+   - `torvalds`（裸用户名也支持）
+3. （可选）填入 **Personal Access Token** 把 API 限额从 60次/小时 提升到 5000次/小时
+4. 点击「开始整理」，稍等片刻 ✅
+
+### 第三步：安装 X 助手插件（可选）
+
+1. 用 Chrome 打开 `chrome://extensions`，开启「开发者模式」
+2. 点击「加载已解压的扩展程序」，选择项目里的 `x-extension/` 目录
+3. 复制插件 ID，粘贴到 HubManager 设置面板的「X 助手插件 ID」栏
+4. 去 `x.com/i/bookmarks` 正常浏览，插件会自动捕获
+5. 回到 HubManager，点「一键同步」即可导入
 
 ---
 
-## 项目结构
+## 🎯 使用场景
+
+**适合什么人用？**
+
+- 🧑‍💻 **重度 GitHub 用户**：Star 了几百上千个项目，想按类别管理而不是让它们沉没
+- 📰 **X/Twitter 技术内容消费者**：每天刷到好帖就收藏，但从来找不回来
+- 🤖 **AI 工具追踪者**：想追踪最新的 AI Agent、MCP、大模型相关项目和讨论
+- 📚 **知识管理爱好者**：想把分散在 GitHub 和 X 的技术积累整合到一处
+
+---
+
+## 🏗 技术架构
 
 ```
 github-manager/
-├─ public/                     # 静态资源（图标、favicon）
-├─ src/
-│  ├─ App.jsx                  # 主界面：侧边栏 + 项目库 + 详情 + 设置
-│  ├─ main.jsx                 # 入口
-│  ├─ index.css                # 全局样式（玻璃态 + 时间线 + 徽章）
-│  ├─ components/
-│  │  └─ ActivityFeed.jsx      # 时间线形式的更新日志
-│  └─ utils/
-│     ├─ github.js             # API 调用、增量、双维度分类、中文说明生成
-│     └─ db.js                 # IndexedDB 封装 + 每用户 lastSync
-├─ scripts/
-│  └─ offline-test.mjs         # 不依赖网络/React 的核心逻辑单测
-├─ package.json
-├─ vite.config.js
-└─ eslint.config.js
+├── src/
+│   ├── App.jsx                   # 主界面：侧边栏 + 项目库 + 设置
+│   ├── index.css                 # 全局样式（暗色玻璃态主题）
+│   ├── components/
+│   │   └── ActivityFeed.jsx      # 时间线式更新日志组件
+│   └── utils/
+│       ├── github.js             # GitHub API + 双维度分类 + 中文说明生成
+│       ├── xParser.js            # X 书签多格式解析器（启发式 + GraphQL）
+│       └── db.js                 # IndexedDB 本地数据层
+├── x-extension/                  # X 助手 Chrome 插件
+│   ├── manifest.json
+│   ├── content.js                # 页面注入 + 数据捕获
+│   ├── inject.js                 # 拦截 XHR/Fetch 网络请求
+│   └── background.js             # 数据暂存 + 与主应用通信
+└── scripts/
+    └── offline-test.mjs          # 82 项离线单元测试
 ```
 
-### 核心模块说明
+**技术栈**
 
-| 模块 | 关键导出 | 用途 |
-|---|---|---|
-| `utils/github.js` | `parseProfileUrl` | 把任何形式的 GitHub 主页地址标准化为 username |
-|  | `fetchAllData(user, token, sinceISO?)` | 并行拉取 repos + starred，带增量截断 |
-|  | `fetchRecentActivity(user, token, projects, sinceISO?)` | 获取时间线需要的 release / commit |
-|  | `fetchReadmeSnippet(fullName, token)` | 详情页按需拉取 README 片段 |
-|  | `detectCategory(raw)` | 技术用途分类（关键字 + 词边界 + topics） |
-|  | `detectScenario(raw)` | 使用场景分类（15 类，规则表驱动） |
-|  | `normalizeProject(raw)` | 合并上述字段并生成中文 `problemSolved / usage / helpsWith` |
-|  | `CATEGORY_LIST`, `SCENARIO_LIST` | 供筛选下拉使用 |
-| `utils/db.js` | `saveData / getAllData / clearStore` | 项目和动态的 CRUD |
-|  | `getLastSync / setLastSync` | 每用户独立的上次同步时间 |
-|  | `resetAll` | 清空整个数据库（切换账号时使用） |
+| 层 | 技术 |
+|----|------|
+| 前端框架 | React 19 + Vite 8 |
+| 动画 | Framer Motion |
+| 图标 | Lucide React |
+| HTTP | Axios |
+| 本地存储 | IndexedDB（无服务端依赖） |
+| 样式 | Vanilla CSS（暗色玻璃态主题） |
+| 插件 | Chrome Extension（Manifest V3） |
 
 ---
 
-## 离线测评
+## 🧪 测试
 
-`scripts/offline-test.mjs` 不依赖 React/Vite/网络，仅用 Node 原生 `import` 加载 `src/utils/github.js` 中的纯函数，覆盖：
-
-- `parseProfileUrl`：7 种输入格式
-- `detectCategory`：10 类代表性样本
-- `detectScenario`：15 类代表性样本
-- `normalizeProject`：字段完整性、中文说明、无 description 兜底
-- `CATEGORY_LIST / SCENARIO_LIST`：长度与完整性
-- `normalizeProject` 同时输出 category + scenario 的组合测试
-
-当前共 **46 项，全部通过**：
+项目包含 **82 项离线单元测试**，覆盖所有核心解析逻辑，不依赖网络和浏览器：
 
 ```bash
 npm test
@@ -156,11 +160,37 @@ npm test
 node scripts/offline-test.mjs
 ```
 
+测试覆盖范围：
+
+- `parseProfileUrl`：7 种 GitHub URL 格式
+- `detectCategory`：10 类项目用途分类
+- `detectScenario`：15 类使用场景分类
+- `normalizeProject`：字段完整性 + 中文说明兜底
+- `parseXBookmarks`：启发式文本解析（多种日期格式、回复推文、噪音过滤）
+- `parseGraphQLRawBookmarks`：GraphQL 响应解析（4 种用户数据结构 + 账户封禁降级）
+
 ---
 
-## 新增一个场景的方法
+## 🔧 进阶配置
 
-如果你想补充新的场景（比如「电商」「旅行」），只需在 `src/utils/github.js` 的 `SCENARIO_RULES` 数组末尾追加一条：
+### 增加 GitHub API 限额（强烈推荐）
+
+匿名调用只有 **60 次/小时**，大号几分钟就耗尽。建议创建一个最小权限 Token：
+
+1. 访问 [github.com/settings/tokens](https://github.com/settings/tokens)
+2. 创建 Classic Token，**无需勾选任何 scope**（只读公共数据就够了）
+3. 粘贴到设置面板
+
+### 配置 AI 增强解析（可选）
+
+在设置面板中添加兼容 OpenAI 格式的大模型 API 配置，支持：
+- DeepSeek API
+- OpenAI API
+- 任何 OpenAI 兼容的本地/云端服务
+
+### 扩展项目分类规则
+
+在 `src/utils/github.js` 的 `SCENARIO_RULES` 数组中追加新场景：
 
 ```js
 ['电商购物', {
@@ -169,41 +199,40 @@ node scripts/offline-test.mjs
 }],
 ```
 
-并在同一文件的 `SCENARIO_LIST` 中加入 `'电商购物'`。最后在 `scripts/offline-test.mjs` 补一个测试样本即可。规则按声明顺序匹配，所以更具体的场景放前面。
+同时在 `SCENARIO_LIST` 中加入 `'电商购物'` 即可生效，无需其他改动。
 
 ---
 
-## 隐私与安全
+## 🔒 隐私说明
 
-- 所有 API 请求由浏览器**直连** `https://api.github.com`，HubManager 没有任何中间服务器
-- Token、项目数据、时间线、lastSync 仅保存在浏览器的 IndexedDB（`GitHubManagerDB`）
-- 侧边栏「切换账号」会一键清空整个数据库，不留痕迹
-- Token 只用来提高 API 限额，建议创建一个最小权限（无 repo、仅 `public_repo` 或空权限）的 token
-
----
-
-## 技术栈
-
-- **React 19** + **Vite**：现代极速开发体验
-- **Framer Motion**：过渡动画
-- **Lucide Icons**：图标
-- **Axios**：GitHub REST API 调用
-- **IndexedDB**：本地持久化，离线也能看之前的数据
+- 所有 GitHub API 请求由你的**浏览器直连** `api.github.com`，中间没有任何服务器
+- GitHub Token、项目数据、X 书签全部存在**浏览器本地 IndexedDB**
+- X 助手插件只在 `x.com` 域名下工作，捕获的数据只存在本地，不发送到任何第三方
+- 「切换账号」操作会一键清空数据库，不留任何痕迹
 
 ---
 
-## Roadmap
+## 📋 Roadmap
 
-- [ ] 导出项目列表为 Markdown / Notion
-- [ ] 支持 Organization 主页
-- [ ] 分类规则可视化编辑器
-- [ ] 订阅推送：指定项目有新版本时在浏览器发通知
-- [ ] PWA 离线安装
+- [ ] 📤 导出项目列表为 Markdown / Notion 表格
+- [ ] 🏢 支持 GitHub Organization 主页
+- [ ] 🔔 订阅推送：关注项目有新版本时浏览器通知
+- [ ] 📱 PWA 离线安装
+- [ ] 🌐 支持 Threads / BlueSky 内容导入
+- [ ] 🤝 分类规则可视化编辑器
 
-欢迎在 Issue 提出建议。
+欢迎提 [Issue](../../issues) 或 [PR](../../pulls)！
 
 ---
 
-## 协议
+## 📄 开源协议
 
-MIT。
+[MIT](LICENSE) © 2025 mol632991-png
+
+---
+
+<div align="center">
+
+**如果这个项目对你有帮助，欢迎点个 ⭐ Star 支持一下！**
+
+</div>
