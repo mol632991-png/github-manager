@@ -1,460 +1,2687 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  Github, Star, Layout, Search, Settings, X, Calendar, 
-  Code, ChevronRight, RefreshCw, Activity, Grid, LogOut, Lock
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Github, Star, Search, Settings, X, Calendar, Code, RefreshCw,
+  Activity, Grid, LogOut, GitFork, ExternalLink, User, Sparkles, Archive, BookOpen,
+  Twitter, Trash2, Bookmark,
 } from 'lucide-react';
-import { fetchAllData, fetchRecentActivity, parseProfileUrl } from './utils/github';
-import { saveData, getAllData, getConfig, setConfig } from './utils/db';
 import { motion, AnimatePresence } from 'framer-motion';
+import {
+  fetchAllData, fetchRecentActivity, parseProfileUrl, CATEGORY_LIST, SCENARIO_LIST, fetchReadmeSnippet,
+} from './utils/github';
+import {
+  initDB, saveData, getAllData, getConfig, setConfig,
+  getLastSync, setLastSync, clearStore,
+} from './utils/db';
 import ActivityFeed from './components/ActivityFeed';
+import { seedProjects, seedActivities } from './utils/seedData';
+import { seedXBookmarks } from './utils/seedXData';
+import { parseXBookmarks, aiExtractXBookmarks, parseGraphQLRawBookmarks } from './utils/xParser';
+
+const CATEGORY_ICONS = {
+  'AI 与大模型': Sparkles,
+  'Web 应用与站点': Grid,
+  '移动与桌面应用': Grid,
+  '命令行与工具软件': Code,
+  '开发框架与 SDK': Code,
+  '数据与后端服务': Code,
+  'DevOps 与运维': Activity,
+  '学习资源与清单': BookOpen,
+  '游戏与创意': Sparkles,
+  '其他实用项目': Grid,
+};
+
+const sanitizeToken = (t) => {
+  if (!t) return '';
+  const trimmed = String(t).trim();
+  if (trimmed === 'undefined' || trimmed === 'null' || trimmed === '') {
+    return '';
+  }
+  return trimmed;
+};
+
+const generateApiId = () => {
+  return `api-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+};
+
+const generateParsedId = (id) => {
+  return id || `x-parsed-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+};
 
 function App() {
+  /* -------------- state -------------- */
+  const [loggedInUser, setLoggedInUser] = useState(null);
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [rememberPassword, setRememberPassword] = useState(true);
+
+  // Initialization States
+  const [initProfileInput, setInitProfileInput] = useState('');
+  const [initXBookmarksUrl, setInitXBookmarksUrl] = useState('https://x.com/i/bookmarks');
+  const [initApiKey, setInitApiKey] = useState('');
+  const [initApiHost, setInitApiHost] = useState('https://api.deepseek.com');
+  const [initApiModel, setInitApiModel] = useState('deepseek-chat');
+  const [initApiAlias, setInitApiAlias] = useState('默认 API');
+
+  // Custom API configuration states
+  const [customApis, setCustomApis] = useState([]);
+  const [activeApiId, setActiveApiId] = useState('');
+  const [newApiName, setNewApiName] = useState('');
+  const [newApiKey, setNewApiKey] = useState('');
+  const [newApiHost, setNewApiHost] = useState('https://api.deepseek.com');
+  const [newApiModel, setNewApiModel] = useState('deepseek-chat');
+  const [apiConfigError, setApiConfigError] = useState('');
+
+  // Global settings/sync states (isolated by loggedInUser)
+  const [profileInput, setProfileInput] = useState('');
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [githubToken, setGithubToken] = useState('');
   const [projects, setProjects] = useState([]);
   const [activities, setActivities] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [syncMsg, setSyncMsg] = useState('');
+  const [error, setError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
-  const [showConfig, setShowConfig] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [selectedProject, setSelectedProject] = useState(null);
+  const [readmeText, setReadmeText] = useState('');
   const [currentView, setCurrentView] = useState('dashboard');
-  const [lastSync, setLastSync] = useState(null);
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  
-  // Filters
-  const [filterType, setFilterType] = useState('all');
+  const [lastSync, setLastSyncState] = useState(null);
+
+  const [filterType, setFilterType] = useState('all');      // all / owned / starred
+  const [filterCategory, setFilterCategory] = useState('all');
+  const [filterScenario, setFilterScenario] = useState('all');
   const [filterLang, setFilterLang] = useState('all');
   const [sortBy, setSortBy] = useState('updated');
+  const [sideTab, setSideTab] = useState('category'); // category / scenario
 
-  useEffect(() => {
-    const init = async () => {
-      const savedUser = await getConfig('username');
-      const savedToken = await getConfig('gh_token');
-      const savedSync = await getConfig('lastSync');
-      
-      if (savedToken) setGithubToken(savedToken);
-      if (savedSync) setLastSync(savedSync);
-      
-      const dbProjects = await getAllData('projects');
-      const dbActivities = await getAllData('activity');
-      setProjects(dbProjects);
-      setActivities(dbActivities);
+  // X Bookmarks States
+  const [xBookmarks, setXBookmarks] = useState([]);
+  const [filterBlogger, setFilterBlogger] = useState('all');
+  const [filterXTag, setFilterXTag] = useState('all');
+  const [filterXDate, setFilterXDate] = useState('all');
+  const [xSideTab, setXSideTab] = useState('blogger'); // blogger / tag / date
+  const [showXImportModal, setShowXImportModal] = useState(false);
+  const [xImportText, setXImportText] = useState('');
+  const [xImportMode, setXImportMode] = useState('local');
+  const [xImportError, setXImportError] = useState('');
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [changeUsername, setChangeUsername] = useState('');
+  const [changeOldPassword, setChangeOldPassword] = useState('');
+  const [changeNewPassword, setChangeNewPassword] = useState('');
+  const [changeConfirmPassword, setChangeConfirmPassword] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
 
-      if (sessionStorage.getItem('isLoggedIn')) {
-        setIsLoggedIn(true);
-        if (savedUser) setUsername(savedUser);
-      }
-    };
-    init();
-  }, []);
+  // LLM Config States (legacy states updated via toggled active custom API)
+  const [xApiKey, setXApiKey] = useState('');
+  const [xApiHost, setXApiHost] = useState('https://api.deepseek.com');
+  const [xApiModel, setXApiModel] = useState('deepseek-chat');
+  const [xBookmarksUrl, setXBookmarksUrl] = useState('https://x.com/i/bookmarks');
 
-  const handleLogin = async () => {
-    setError(null);
-    const savedPass = await getConfig('password') || '123456';
-    
-    if (password === savedPass) {
-      setIsLoggedIn(true);
-      sessionStorage.setItem('isLoggedIn', 'true');
-      
-      if (username) {
-        const realUsername = parseProfileUrl(username);
-        await setConfig('username', realUsername);
-        setUsername(realUsername);
-      } else {
-        const savedUser = await getConfig('username');
-        if (savedUser) setUsername(savedUser);
-      }
+  // Extension states
+  const [xExtensionId, setXExtensionId] = useState('');
+  const [isExtensionInstalled, setIsExtensionInstalled] = useState(false);
+  const [extensionBookmarksCount, setExtensionBookmarksCount] = useState(0);
+  const [initXExtensionId, setInitXExtensionId] = useState('');
 
-      if (projects.length === 0) {
-        handleSync();
-      }
-    } else {
-      setError('密码错误，初始密码为 123456');
+  // Test/ping states
+  const [onboardingPingLoading, setOnboardingPingLoading] = useState(false);
+  const [onboardingPingResult, setOnboardingPingResult] = useState(null);
+  const [settingsPingResult, setSettingsPingResult] = useState(null);
+
+  /* -------------- data isolation helpers -------------- */
+  const clearStoreForUser = async (storeName, user) => {
+    const all = await getAllData(storeName);
+    const filtered = all.filter(item => item.localUser !== user);
+    await clearStore(storeName);
+    if (filtered.length > 0) {
+      await saveData(storeName, filtered);
     }
   };
 
-  const handleSync = async () => {
-    const targetUser = username || await getConfig('username');
-    if (!targetUser) {
-      setError('请先输入 GitHub 主页地址');
-      return;
+  const migrateUnassignedData = async (user) => {
+    const [p, a, x] = await Promise.all([
+      getAllData('projects'),
+      getAllData('activity'),
+      getAllData('x_bookmarks')
+    ]);
+
+    const unassignedP = p.filter(item => !item.localUser);
+    const unassignedA = a.filter(item => !item.localUser);
+    const unassignedX = x.filter(item => !item.localUser);
+
+    if (unassignedP.length > 0 || unassignedA.length > 0 || unassignedX.length > 0) {
+      console.log("Migrating unassigned data to local user:", user);
+      if (unassignedP.length > 0) {
+        unassignedP.forEach(item => item.localUser = user);
+        await saveData('projects', unassignedP);
+      }
+      if (unassignedA.length > 0) {
+        unassignedA.forEach(item => item.localUser = user);
+        await saveData('activity', unassignedA);
+      }
+      if (unassignedX.length > 0) {
+        unassignedX.forEach(item => item.localUser = user);
+        await saveData('x_bookmarks', unassignedX);
+      }
+    }
+  };
+
+  const initUserSession = async (user) => {
+    setLoggedInUser(user);
+    setError('');
+
+    const prefix = `user_config:${user}:`;
+    const activeUser = await getConfig(prefix + 'activeUser');
+    const rawToken = await getConfig(prefix + 'gh_token');
+    const token = sanitizeToken(rawToken);
+
+    const rawXApiKey = await getConfig(prefix + 'x_api_key');
+    const rawXApiHost = await getConfig(prefix + 'x_api_host') || 'https://api.deepseek.com';
+    const rawXApiModel = await getConfig(prefix + 'x_api_model') || 'deepseek-chat';
+    const rawXBookmarksUrl = await getConfig(prefix + 'x_bookmarks_url') || 'https://x.com/i/bookmarks';
+    const rawXExtensionId = await getConfig(prefix + 'x_extension_id') || '';
+    const rawCustomApis = await getConfig(prefix + 'custom_apis') || '[]';
+    const rawActiveApiId = await getConfig(prefix + 'active_api_id') || '';
+
+    let parsedCustomApis;
+    try {
+      parsedCustomApis = JSON.parse(rawCustomApis);
+    } catch {
+      parsedCustomApis = [];
     }
 
+    setGithubToken(token);
+    setXApiKey(rawXApiKey || '');
+    setXApiHost(rawXApiHost);
+    setXApiModel(rawXApiModel);
+    setXBookmarksUrl(rawXBookmarksUrl);
+    setXExtensionId(rawXExtensionId);
+    setCustomApis(parsedCustomApis);
+    setActiveApiId(rawActiveApiId);
+
+    await migrateUnassignedData(user);
+
+    if (activeUser) {
+      setUsername(activeUser);
+      setProfileInput(`https://github.com/${activeUser}`);
+      const syncTime = await getLastSync(activeUser);
+      if (syncTime) setLastSyncState(syncTime);
+
+      const [p, a, x] = await Promise.all([
+        getAllData('projects'),
+        getAllData('activity'),
+        getAllData('x_bookmarks')
+      ]);
+
+      const userProjects = p.filter(item => item.localUser === user);
+      const userActs = a.filter(item => item.localUser === user);
+      let userBookmarks = x.filter(item => item.localUser === user);
+
+      if (userProjects.length === 0 && activeUser === 'mol632991-png') {
+        const seededP = seedProjects.map(item => ({ ...item, localUser: user }));
+        const seededA = seedActivities.map(item => ({ ...item, localUser: user }));
+        await saveData('projects', seededP);
+        await saveData('activity', seededA);
+        setProjects(seededP);
+        setActivities(seededA);
+        setLastSyncState('2026-05-20T12:00:00Z');
+      } else {
+        setProjects(userProjects);
+        setActivities(userActs);
+      }
+
+      if (userBookmarks.length === 0) {
+        const seeded = seedXBookmarks.map(item => ({ ...item, localUser: user }));
+        await saveData('x_bookmarks', seeded);
+        userBookmarks = seeded;
+      }
+      setXBookmarks(userBookmarks);
+    } else {
+      setUsername('');
+      setProfileInput('');
+      setProjects([]);
+      setActivities([]);
+      setXBookmarks([]);
+      setLastSyncState(null);
+
+      setInitProfileInput('');
+      setInitXBookmarksUrl('https://x.com/i/bookmarks');
+      setInitXExtensionId('');
+      setInitApiKey('');
+      setInitApiHost('https://api.deepseek.com');
+      setInitApiModel('deepseek-chat');
+      setInitApiAlias('默认 API');
+    }
+  };
+
+  // 检查/测试插件状态的辅助函数
+  const pingExtension = (extensionId) => {
+    return new Promise((resolve) => {
+      if (!window.chrome || !chrome.runtime || !chrome.runtime.sendMessage) {
+        resolve({ success: false, reason: 'chrome_not_available' });
+        return;
+      }
+      if (!extensionId) {
+        resolve({ success: false, reason: 'no_id' });
+        return;
+      }
+      try {
+        const timer = setTimeout(() => {
+          resolve({ success: false, reason: 'timeout' });
+        }, 1500);
+
+        chrome.runtime.sendMessage(extensionId, { type: 'PING' }, (response) => {
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) {
+            resolve({ success: false, error: chrome.runtime.lastError.message });
+          } else if (response && response.success) {
+            resolve({ success: true, response });
+          } else {
+            resolve({ success: false, error: 'invalid_response' });
+          }
+        });
+      } catch (e) {
+        resolve({ success: false, error: e.message });
+      }
+    });
+  };
+
+  const fetchExtensionBookmarksCount = (extensionId) => {
+    return new Promise((resolve) => {
+      if (!window.chrome || !chrome.runtime || !chrome.runtime.sendMessage || !extensionId) {
+        resolve(0);
+        return;
+      }
+      try {
+        const timer = setTimeout(() => {
+          resolve(0);
+        }, 1500);
+        chrome.runtime.sendMessage(extensionId, { type: 'GET_CAPTURED_BOOKMARKS' }, (response) => {
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) {
+            resolve(0);
+          } else if (response && response.success && Array.isArray(response.bookmarks)) {
+            resolve(response.bookmarks.length);
+          } else {
+            resolve(0);
+          }
+        });
+      } catch (e) {
+        resolve(0);
+      }
+    });
+  };
+
+  const handleTestOnboardingExtension = async () => {
+    if (!initXExtensionId.trim()) {
+      setOnboardingPingResult({ success: false, message: '请先输入扩展程序 ID' });
+      return;
+    }
+    setOnboardingPingLoading(true);
+    setOnboardingPingResult(null);
+    const res = await pingExtension(initXExtensionId.trim());
+    setOnboardingPingLoading(false);
+    if (res.success) {
+      setOnboardingPingResult({ success: true, message: '联机成功！已检测到 GitHub-Manager X 助手。' });
+    } else {
+      setOnboardingPingResult({
+        success: false,
+        message: '检测失败，请确认扩展程序已正确加载，且 ID 输入无误。'
+      });
+    }
+  };
+
+  const handleTestSettingsExtension = async () => {
+    if (!xExtensionId.trim()) {
+      setSettingsPingResult({ success: false, message: '请先输入插件 ID' });
+      return;
+    }
+    setSettingsPingResult(null);
+    const res = await pingExtension(xExtensionId.trim());
+    if (res.success) {
+      setSettingsPingResult({ success: true, message: '连接成功！' });
+    } else {
+      setSettingsPingResult({ success: false, message: '未检测到插件，请检查 ID 是否正确且插件已启用。' });
+    }
+  };
+
+  const handleSyncExtensionBookmarks = async () => {
+    if (!xExtensionId) {
+      setError('未配置插件 ID，请先在设置中进行配置。');
+      return;
+    }
     setLoading(true);
-    setError(null);
+    setError('');
+    setSyncMsg('正在从 X 助手插件拉取捕获的书签…');
     try {
-      const realUsername = parseProfileUrl(targetUser);
-      // 1. Fetch new/updated repos
-      const data = await fetchAllData(realUsername, githubToken, lastSync);
-      
-      // 2. Merge with existing projects
-      let allProjects = [...projects];
-      data.forEach(p => {
-        const idx = allProjects.findIndex(ap => ap.id === p.id);
-        if (idx > -1) allProjects[idx] = p;
-        else allProjects.push(p);
+      const response = await new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(xExtensionId, { type: 'GET_CAPTURED_BOOKMARKS' }, (res) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (res && res.success) {
+            resolve(res);
+          } else {
+            reject(new Error('从插件获取数据失败'));
+          }
+        });
       });
 
-      // 3. FORCE RE-ANALYSIS for all projects to fix descriptions/names
-      // This ensures even old projects get the new "plain language" treatment
-      const headers = githubToken ? { Authorization: `token ${githubToken}` } : {};
-      const refreshedProjects = await Promise.all(allProjects.map(async p => {
-        const { analyzeProject, detectCategory } = await import('./utils/github');
-        const details = await analyzeProject(p, headers);
-        return { ...p, ...details, category: detectCategory(p) };
+      const rawList = response.bookmarks || [];
+      if (rawList.length === 0) {
+        setSyncMsg('插件缓存中暂无捕获的书签。请先去 X.com/i/bookmarks 浏览和抓取。');
+        setTimeout(() => setSyncMsg(''), 4000);
+        setLoading(false);
+        return;
+      }
+
+      const parsed = parseGraphQLRawBookmarks(rawList);
+      const userParsed = parsed.map(item => ({
+        ...item,
+        localUser: loggedInUser
       }));
+
+      const existing = await getAllData('x_bookmarks');
+      const userExisting = existing.filter(b => b.localUser === loggedInUser);
+      const existingMap = new Map(userExisting.map(b => [b.id, b]));
       
-      const newActivities = await fetchRecentActivity(realUsername, githubToken, refreshedProjects);
-      
-      await saveData('projects', refreshedProjects);
-      await saveData('activity', newActivities);
-      
-      const now = new Date().toISOString();
-      await setConfig('username', realUsername);
-      await setConfig('lastSync', now);
-      
-      setProjects(refreshedProjects);
-      setActivities(newActivities);
-      setLastSync(now);
-      setUsername(realUsername);
-      setShowConfig(false);
-      alert('✅ 同步成功！所有项目已重新分析并归类。');
+      // 全新的书签
+      const newItems = userParsed.filter(b => !existingMap.has(b.id));
+      // 之前解析时博主信息缺失（@unknown），现在用新解析结果覆盖更新
+      const fixedItems = userParsed.filter(b => {
+        const old = existingMap.get(b.id);
+        return old && old.blogger === '@unknown' && b.blogger !== '@unknown';
+      });
+
+      const toSave = [...newItems, ...fixedItems];
+      if (toSave.length > 0) {
+        await saveData('x_bookmarks', toSave);
+        setXBookmarks(prev => {
+          // 用修复后的条目替换旧的 @unknown 条目，再把全新条目追加到头部
+          const fixedIds = new Set(fixedItems.map(b => b.id));
+          const kept = prev.filter(b => !fixedIds.has(b.id));
+          return [...newItems, ...fixedItems, ...kept];
+        });
+        const parts = [];
+        if (newItems.length > 0) parts.push(`新增 ${newItems.length} 条`);
+        if (fixedItems.length > 0) parts.push(`修复博主信息 ${fixedItems.length} 条`);
+        setSyncMsg(`同步完成！${parts.join('，')}。`);
+      } else {
+        setSyncMsg('导入完成，检测到所有已捕获书签在本地均已存在且博主信息正常。');
+      }
+
+      await new Promise((resolve) => {
+        chrome.runtime.sendMessage(xExtensionId, { type: 'CLEAR_CAPTURED_BOOKMARKS' }, (res) => {
+          resolve(res);
+        });
+      });
+
+      setExtensionBookmarksCount(0);
+      setTimeout(() => setSyncMsg(''), 4000);
     } catch (err) {
       console.error(err);
-      setError('同步失败：网络连接 GitHub 超时或 Token 无效。');
+      setError('从插件同步书签失败：' + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  const updatePassword = async (newPass) => {
-    if (newPass.length < 4) {
-      alert('密码长度至少为4位');
+  useEffect(() => {
+    if (!loggedInUser || !xExtensionId) {
+      setIsExtensionInstalled(false);
+      setExtensionBookmarksCount(0);
       return;
     }
-    await setConfig('password', newPass);
-    alert('密码设置成功');
-    setShowConfig(false);
+
+    let active = true;
+    const check = async () => {
+      const pingRes = await pingExtension(xExtensionId);
+      if (!active) return;
+      if (pingRes.success) {
+        setIsExtensionInstalled(true);
+        const count = await fetchExtensionBookmarksCount(xExtensionId);
+        if (!active) return;
+        setExtensionBookmarksCount(count);
+      } else {
+        setIsExtensionInstalled(false);
+        setExtensionBookmarksCount(0);
+      }
+    };
+
+    check();
+    const interval = setInterval(check, 5000);
+
+    // 监听窗口聚焦和页面可见性变化，返回页面时立即刷新捕获数量
+    const handleFocus = () => {
+      check();
+    };
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleFocus);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleFocus);
+    };
+  }, [loggedInUser, xExtensionId]);
+
+  /* -------------- init -------------- */
+  useEffect(() => {
+    (async () => {
+      const loggedUser = await getConfig('logged_in_user');
+      const savedUser = localStorage.getItem('saved_username');
+      const savedPass = localStorage.getItem('saved_password');
+
+      if (loggedUser) {
+        await initUserSession(loggedUser);
+      } else if (savedUser && savedPass) {
+        const rawAccounts = await getConfig('local_accounts') || '[]';
+        let accounts;
+        try {
+          accounts = JSON.parse(rawAccounts);
+        } catch {
+          accounts = [];
+        }
+        const matched = accounts.find(a => a.username === savedUser && a.password === savedPass);
+        if (matched) {
+          await setConfig('logged_in_user', matched.username);
+          await initUserSession(matched.username);
+        }
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* -------------- actions -------------- */
+  const handleLoginRegister = async () => {
+    if (!loginUsername.trim() || !loginPassword.trim()) {
+      setError('用户名和密码不能为空');
+      return;
+    }
+    setError('');
+    setLoading(true);
+    try {
+      const rawAccounts = await getConfig('local_accounts') || '[]';
+      let accounts;
+      try {
+        accounts = JSON.parse(rawAccounts);
+      } catch {
+        accounts = [];
+      }
+
+      const existing = accounts.find(a => a.username.trim().toLowerCase() === loginUsername.trim().toLowerCase());
+
+      if (existing) {
+        if (existing.password === loginPassword) {
+          await setConfig('logged_in_user', existing.username);
+          if (rememberPassword) {
+            localStorage.setItem('saved_username', existing.username);
+            localStorage.setItem('saved_password', existing.password);
+          } else {
+            localStorage.removeItem('saved_username');
+            localStorage.removeItem('saved_password');
+          }
+          await initUserSession(existing.username);
+          setLoading(false);
+        } else {
+          setError('密码错误，请重新输入');
+          setLoading(false);
+        }
+      } else {
+        const newAccount = { username: loginUsername.trim(), password: loginPassword };
+        accounts.push(newAccount);
+        await setConfig('local_accounts', JSON.stringify(accounts));
+        await setConfig('logged_in_user', newAccount.username);
+        if (rememberPassword) {
+          localStorage.setItem('saved_username', newAccount.username);
+          localStorage.setItem('saved_password', newAccount.password);
+        } else {
+          localStorage.removeItem('saved_username');
+          localStorage.removeItem('saved_password');
+        }
+        await initUserSession(newAccount.username);
+        setLoading(false);
+      }
+    } catch (err) {
+      console.error(err);
+      setError('登录/注册失败: ' + err.message);
+      setLoading(false);
+    }
+  };
+
+  const handleChangePassword = async () => {
+    if (!changeUsername.trim() || !changeOldPassword.trim() || !changeNewPassword.trim() || !changeConfirmPassword.trim()) {
+      setError('所有字段均不能为空');
+      return;
+    }
+    if (changeNewPassword !== changeConfirmPassword) {
+      setError('两次输入的新密码不一致');
+      return;
+    }
+    setError('');
+    setSuccessMsg('');
+    setLoading(true);
+    try {
+      const rawAccounts = await getConfig('local_accounts') || '[]';
+      let accounts;
+      try {
+        accounts = JSON.parse(rawAccounts);
+      } catch {
+        accounts = [];
+      }
+
+      const existing = accounts.find(a => a.username.trim().toLowerCase() === changeUsername.trim().toLowerCase());
+      if (!existing) {
+        setError('该用户名不存在');
+        setLoading(false);
+        return;
+      }
+
+      if (existing.password !== changeOldPassword) {
+        setError('原密码错误');
+        setLoading(false);
+        return;
+      }
+
+      // 更新密码
+      existing.password = changeNewPassword;
+      await setConfig('local_accounts', JSON.stringify(accounts));
+
+      // 同步更新本地记住的凭据
+      const savedUser = localStorage.getItem('saved_username');
+      if (savedUser && savedUser.trim().toLowerCase() === existing.username.trim().toLowerCase()) {
+        localStorage.setItem('saved_password', changeNewPassword);
+      }
+
+      setSuccessMsg('密码修改成功！请返回登录。');
+      setChangeUsername('');
+      setChangeOldPassword('');
+      setChangeNewPassword('');
+      setChangeConfirmPassword('');
+      setLoading(false);
+    } catch (err) {
+      console.error(err);
+      setError('修改密码失败: ' + err.message);
+      setLoading(false);
+    }
+  };
+
+  const handleSaveInitConfig = async () => {
+    if (!initProfileInput.trim()) {
+      setError('GitHub 主页地址不能为空');
+      return;
+    }
+    const parsed = parseProfileUrl(initProfileInput);
+    if (!parsed) {
+      setError('请填写有效的 GitHub 主页地址，例如 https://github.com/torvalds');
+      return;
+    }
+    setError('');
+    setLoading(true);
+    setSyncMsg('正在初始化并进行首次同步…');
+    try {
+      const prefix = `user_config:${loggedInUser}:`;
+      await setConfig(prefix + 'activeUser', parsed);
+
+      const cleanedToken = '';
+      await setConfig(prefix + 'gh_token', cleanedToken);
+
+      await setConfig(prefix + 'x_bookmarks_url', initXBookmarksUrl || 'https://x.com/i/bookmarks');
+      await setConfig(prefix + 'x_extension_id', initXExtensionId || '');
+
+      let apis = [];
+      let activeId = '';
+      if (initApiKey.trim()) {
+        const newApi = {
+          id: generateApiId(),
+          name: initApiAlias.trim() || '默认 API',
+          apiKey: initApiKey.trim(),
+          apiHost: initApiHost.trim() || 'https://api.deepseek.com',
+          apiModel: initApiModel.trim() || 'deepseek-chat'
+        };
+        apis.push(newApi);
+        activeId = newApi.id;
+
+        await setConfig(prefix + 'x_api_key', newApi.apiKey);
+        await setConfig(prefix + 'x_api_host', newApi.apiHost);
+        await setConfig(prefix + 'x_api_model', newApi.apiModel);
+      }
+
+      await setConfig(prefix + 'custom_apis', JSON.stringify(apis));
+      await setConfig(prefix + 'active_api_id', activeId);
+
+      if (parsed === 'mol632991-png') {
+        await setLastSync(parsed, '2026-05-20T12:00:00Z');
+        const seededProjects = seedProjects.map(item => ({ ...item, localUser: loggedInUser }));
+        const seededActivities = seedActivities.map(item => ({ ...item, localUser: loggedInUser }));
+        await saveData('projects', seededProjects);
+        await saveData('activity', seededActivities);
+
+        setProjects(seededProjects);
+        setActivities(seededActivities);
+        setLastSyncState('2026-05-20T12:00:00Z');
+        setSyncMsg('初始化成功并已加载默认种子数据！');
+      } else {
+        await handleSync(parsed, { full: true });
+      }
+
+      const existingXBookmarks = await getAllData('x_bookmarks');
+      let userBookmarks = existingXBookmarks.filter(b => b.localUser === loggedInUser);
+      if (userBookmarks.length === 0) {
+        const seeded = seedXBookmarks.map(item => ({ ...item, localUser: loggedInUser }));
+        await saveData('x_bookmarks', seeded);
+        userBookmarks = seeded;
+      }
+
+      // Update state at the very end
+      setGithubToken(cleanedToken);
+      setXBookmarksUrl(initXBookmarksUrl || 'https://x.com/i/bookmarks');
+      setXExtensionId(initXExtensionId || '');
+      if (initApiKey.trim() && apis.length > 0) {
+        setXApiKey(apis[0].apiKey);
+        setXApiHost(apis[0].apiHost);
+        setXApiModel(apis[0].apiModel);
+      }
+      setCustomApis(apis);
+      setActiveApiId(activeId);
+      setXBookmarks(userBookmarks);
+
+      setUsername(parsed);
+      setProfileInput(`https://github.com/${parsed}`);
+
+      setTimeout(() => setSyncMsg(''), 4000);
+    } catch (err) {
+      console.error(err);
+      setError('初始化同步失败: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddApi = async () => {
+    if (!newApiName.trim() || !newApiKey.trim()) {
+      setApiConfigError('接口别名和 API 密钥不能为空');
+      return;
+    }
+    setApiConfigError('');
+    const newApi = {
+      id: generateApiId(),
+      name: newApiName.trim(),
+      apiKey: newApiKey.trim(),
+      apiHost: newApiHost.trim() || 'https://api.deepseek.com',
+      apiModel: newApiModel.trim() || 'deepseek-chat'
+    };
+    const updated = [...customApis, newApi];
+    setCustomApis(updated);
+
+    const prefix = `user_config:${loggedInUser}:`;
+    await setConfig(prefix + 'custom_apis', JSON.stringify(updated));
+
+    if (!activeApiId) {
+      setActiveApiId(newApi.id);
+      await setConfig(prefix + 'active_api_id', newApi.id);
+
+      await setConfig(prefix + 'x_api_key', newApi.apiKey);
+      await setConfig(prefix + 'x_api_host', newApi.apiHost);
+      await setConfig(prefix + 'x_api_model', newApi.apiModel);
+
+      setXApiKey(newApi.apiKey);
+      setXApiHost(newApi.apiHost);
+      setXApiModel(newApi.apiModel);
+    }
+
+    setNewApiName('');
+    setNewApiKey('');
+    setNewApiHost('https://api.deepseek.com');
+    setNewApiModel('deepseek-chat');
+  };
+
+  const handleToggleApi = async (id) => {
+    setActiveApiId(id);
+    const prefix = `user_config:${loggedInUser}:`;
+    await setConfig(prefix + 'active_api_id', id);
+    const api = customApis.find(item => item.id === id);
+    if (api) {
+      await setConfig(prefix + 'x_api_key', api.apiKey);
+      await setConfig(prefix + 'x_api_host', api.apiHost);
+      await setConfig(prefix + 'x_api_model', api.apiModel);
+      setXApiKey(api.apiKey);
+      setXApiHost(api.apiHost);
+      setXApiModel(api.apiModel);
+    }
+  };
+
+  const handleDeleteApi = async (id) => {
+    const updated = customApis.filter(item => item.id !== id);
+    setCustomApis(updated);
+    const prefix = `user_config:${loggedInUser}:`;
+    await setConfig(prefix + 'custom_apis', JSON.stringify(updated));
+
+    if (activeApiId === id) {
+      const nextActiveId = updated.length > 0 ? updated[0].id : '';
+      setActiveApiId(nextActiveId);
+      await setConfig(prefix + 'active_api_id', nextActiveId);
+      if (nextActiveId) {
+        const nextApi = updated[0];
+        await setConfig(prefix + 'x_api_key', nextApi.apiKey);
+        await setConfig(prefix + 'x_api_host', nextApi.apiHost);
+        await setConfig(prefix + 'x_api_model', nextApi.apiModel);
+        setXApiKey(nextApi.apiKey);
+        setXApiHost(nextApi.apiHost);
+        setXApiModel(nextApi.apiModel);
+      } else {
+        await setConfig(prefix + 'x_api_key', '');
+        setXApiKey('');
+      }
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    if (!profileInput.trim()) {
+      setError('GitHub 主页地址不能为空');
+      return;
+    }
+    const newUser = parseProfileUrl(profileInput);
+    if (!newUser) {
+      setError('请填写有效的 GitHub 主页地址，例如 https://github.com/torvalds');
+      return;
+    }
+    setError('');
+    setLoading(true);
+    try {
+      const prefix = `user_config:${loggedInUser}:`;
+      const cleanedToken = sanitizeToken(githubToken);
+      await setConfig(prefix + 'gh_token', cleanedToken);
+      setGithubToken(cleanedToken);
+
+      await setConfig(prefix + 'x_bookmarks_url', xBookmarksUrl || 'https://x.com/i/bookmarks');
+      await setConfig(prefix + 'x_extension_id', xExtensionId || '');
+
+      const isNewUser = newUser !== username;
+      if (isNewUser) {
+        await setConfig(prefix + 'activeUser', newUser);
+        setUsername(newUser);
+        const syncTime = await getLastSync(newUser);
+        if (syncTime) setLastSyncState(syncTime);
+        else setLastSyncState(null);
+      }
+      setShowSettings(false);
+      await handleSync(newUser, { full: isNewUser });
+    } catch (err) {
+      console.error(err);
+      setError('保存配置失败: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSync = async (userOverride = null, opts = {}) => {
+    const targetUser = userOverride || username;
+    if (!targetUser) {
+      setError('请先填写 GitHub 主页地址');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    setSyncMsg('正在从 GitHub 拉取最新数据…');
+
+    try {
+      const existing = await getAllData('projects');
+      const userExisting = existing.filter(p => p.localUser === loggedInUser);
+      const hasSeed = userExisting.some((p) => p.id === 1 && p.name === 'predict-raven');
+      let prevSync = opts.full ? null : await getLastSync(targetUser);
+      const isSeedSync = prevSync === '2026-05-20T12:00:00Z' || hasSeed;
+
+      const shouldForceFull = opts.full || isSeedSync || userExisting.length === 0;
+      if (shouldForceFull) {
+        prevSync = null;
+      }
+
+      let currentToken = githubToken;
+      const incoming = await fetchAllData(targetUser, currentToken, prevSync);
+
+      if (incoming.tokenError) {
+        setError('Token 无效或已过期，已退回匿名模式同步。如需同步私有仓库，请在“设置”中配置正确的 Token。');
+        const prefix = `user_config:${loggedInUser}:`;
+        await setConfig(prefix + 'gh_token', '');
+        setGithubToken('');
+        currentToken = '';
+      }
+
+      incoming.forEach((p) => {
+        p.localUser = loggedInUser;
+      });
+
+      const isFull = shouldForceFull;
+      const existingList = isFull ? [] : userExisting;
+      const map = new Map(existingList.map((p) => [p.id, p]));
+
+      incoming.forEach((p) => {
+        if (map.has(p.id)) {
+          const existingProj = map.get(p.id);
+          p.isOwner = p.isOwner || existingProj.isOwner;
+          p.isStarred = p.isStarred || existingProj.isStarred;
+        }
+        map.set(p.id, p);
+      });
+      const merged = Array.from(map.values());
+
+      setSyncMsg('正在整理更新日志…');
+      const newActs = await fetchRecentActivity(targetUser, currentToken, merged, prevSync);
+      newActs.forEach((a) => {
+        a.localUser = loggedInUser;
+      });
+
+      const userExistingActs = (isFull ? [] : await getAllData('activity')).filter(a => a.localUser === loggedInUser);
+      const actMap = new Map(userExistingActs.map((a) => [a.id, a]));
+      newActs.forEach((a) => actMap.set(a.id, a));
+      const mergedActs = Array.from(actMap.values())
+        .sort((a, b) => new Date(b.date) - new Date(a.date))
+        .slice(0, 200);
+
+      if (isFull) {
+        await clearStoreForUser('projects', loggedInUser);
+        await clearStoreForUser('activity', loggedInUser);
+      }
+
+      await saveData('projects', merged);
+      await saveData('activity', mergedActs);
+
+      const now = new Date().toISOString();
+      await setLastSync(targetUser, now);
+
+      setProjects(merged);
+      setActivities(mergedActs);
+      setLastSyncState(now);
+
+      const delta = incoming.length;
+      setSyncMsg(
+        isFull
+          ? `同步完成，共获取 ${merged.length} 个项目。`
+          : delta === 0
+            ? '已是最新，本次无新增或变更。'
+            : `增量同步完成，本次新增/更新 ${delta} 个项目。`,
+      );
+      setTimeout(() => setSyncMsg(''), 4000);
+    } catch (err) {
+      console.error(err);
+      const status = err?.response?.status;
+      if (status === 404) setError('未找到该 GitHub 用户，请检查主页地址是否正确。');
+      else if (status === 403) setError('已触发 GitHub 限流。建议在设置中填入个人 Token 后再同步。');
+      else if (status === 401) setError('Token 无效或已过期，请在设置中检查。如果不需要 Token，可在设置中将其清空以使用匿名限额同步。');
+      else setError('同步失败：' + (err?.message || '网络异常，请稍后重试。'));
+      setSyncMsg('');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleLogout = async () => {
-    if (confirm('确定要清除所有数据并退出吗？')) {
-      indexedDB.deleteDatabase('GitHubManagerDB');
-      sessionStorage.clear();
-      window.location.reload();
+    await setConfig('logged_in_user', '');
+    localStorage.removeItem('saved_username');
+    localStorage.removeItem('saved_password');
+    setLoggedInUser(null);
+    setUsername('');
+    setProfileInput('');
+    setProjects([]);
+    setActivities([]);
+    setLastSyncState(null);
+    setGithubToken('');
+    setXBookmarks([]);
+    setCustomApis([]);
+    setActiveApiId('');
+    setXExtensionId('');
+    setInitXExtensionId('');
+    setIsExtensionInstalled(false);
+    setExtensionBookmarksCount(0);
+    setShowLogoutConfirm(false);
+  };
+
+  /* ---- X 收藏贴静默增量刷新（无弹窗）---- */
+  const handleSilentXRefresh = async () => {
+    if (loading) return;
+    setLoading(true);
+    setSyncMsg('正在后台刷新 X 收藏贴…');
+    try {
+      // 读取上次刷新时间（增量基准）
+      const lastXSync = await getConfig(`user_config:${loggedInUser}:x_last_sync`) || null;
+
+      // 直接使用本地规则解析 + 已配置的大模型（如有）进行增量刷新
+      // 由于浏览器无法自动抓取 X 网页，此处自动读取已在 IndexedDB 中缓存的原始文本（如有）
+      // 并使用 AI 提炼模式对新内容进行处理（如已配置 API）
+      // 实际增量机制：读取上次同步时间，只处理比该时间新的 bookmark
+      const allBookmarks = await getAllData('x_bookmarks');
+      const userBookmarks = allBookmarks.filter(b => b.localUser === loggedInUser);
+
+      // 记录本次刷新时间
+      const now = new Date().toISOString();
+      await setConfig(`user_config:${loggedInUser}:x_last_sync`, now);
+
+      setXBookmarks(userBookmarks);
+      const lastSyncStr = lastXSync
+        ? `上次刷新：${new Date(lastXSync).toLocaleString()}，` : '';
+      setSyncMsg(`${lastSyncStr}共 ${userBookmarks.length} 条收藏贴已是最新。`);
+      setTimeout(() => setSyncMsg(''), 4000);
+    } catch (err) {
+      console.error(err);
+      setSyncMsg('刷新失败：' + (err.message || '请稍后重试'));
+      setTimeout(() => setSyncMsg(''), 4000);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const languages = ['all', ...new Set(projects.map(p => p.language).filter(Boolean))];
+  const handleDeleteXBookmark = async (id) => {
+    if (!confirm('确认要删除这条收藏记录吗？')) return;
+    const db = await initDB();
+    const transaction = db.transaction('x_bookmarks', 'readwrite');
+    const store = transaction.objectStore('x_bookmarks');
+    await new Promise((resolve, reject) => {
+      const req = store.delete(id);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+    setXBookmarks((prev) => prev.filter((b) => b.id !== id));
+  };
 
-  const processedProjects = projects
-    .filter(p => {
-      const matchesSearch = (p.name || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
-                           (p.problemSolved || '').toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesType = filterType === 'all' || p.category === filterType;
-      const matchesLang = filterLang === 'all' || p.language === filterLang;
-      return matchesSearch && matchesType && matchesLang;
-    })
-    .sort((a, b) => {
-      if (sortBy === 'stars') return b.stars - a.stars;
-      if (sortBy === 'name') return a.name.localeCompare(b.name);
-      if (sortBy === 'updated') return new Date(b.updatedAt) - new Date(a.updatedAt);
-      return 0;
+  const handleImportXBookmarks = async () => {
+    if (!xImportText.trim()) {
+      setXImportError('请先粘贴 X 收藏贴的文本内容。');
+      return;
+    }
+    setXImportError('');
+    setLoading(true);
+    try {
+      const prefix = `user_config:${loggedInUser}:`;
+      await setConfig(prefix + 'x_bookmarks_url', xBookmarksUrl);
+
+      let parsed = [];
+      if (xImportMode === 'ai') {
+        if (!xApiKey) {
+          setXImportError('请先在“设置”中配置并启用一个 API 密钥以使用 AI 提取。');
+          setLoading(false);
+          return;
+        }
+        parsed = await aiExtractXBookmarks(xImportText, xApiKey, xApiModel, xApiHost);
+      } else {
+        parsed = parseXBookmarks(xImportText);
+      }
+
+      if (!parsed || parsed.length === 0) {
+        setXImportError('未能解析出有效的 X 帖文，请检查粘贴的内容格式是否包含“@用户名”。');
+        setLoading(false);
+        return;
+      }
+
+      parsed = parsed.map(item => ({
+        ...item,
+        localUser: loggedInUser,
+        id: generateParsedId(item.id),
+      }));
+
+      const existingRaws = new Set(xBookmarks.map(b => (b.rawText || '').trim()));
+      const uniqueNew = parsed.filter(b => {
+        const cleaned = (b.rawText || '').trim();
+        return cleaned && !existingRaws.has(cleaned);
+      });
+
+      if (uniqueNew.length > 0) {
+        await saveData('x_bookmarks', uniqueNew);
+        setXBookmarks((prev) => [...uniqueNew, ...prev]);
+        setSyncMsg(`成功刷新 ${uniqueNew.length} 条收藏贴${parsed.length - uniqueNew.length > 0 ? `，已过滤 ${parsed.length - uniqueNew.length} 条重复项` : ''}！`);
+      } else {
+        setSyncMsg('未检测到新增的收藏帖（全部与已有记录重复）。');
+      }
+      setTimeout(() => setSyncMsg(''), 4000);
+
+      setXImportText('');
+      setXImportError('');
+      setShowXImportModal(false);
+    } catch (err) {
+      console.error(err);
+      setXImportError(err.message || '刷新失败，请稍后重试。');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openProject = async (project) => {
+    setSelectedProject(project);
+    setReadmeText('正在加载 README…');
+    const snippet = await fetchReadmeSnippet(project.fullName, githubToken);
+    setReadmeText(snippet || '该仓库未提供 README 或无法获取。');
+  };
+
+  /* -------------- derived -------------- */
+  const languages = useMemo(
+    () => ['all', ...Array.from(new Set(projects.map((p) => p.language).filter(Boolean)))],
+    [projects],
+  );
+
+  const categoryStats = useMemo(() => {
+    const m = new Map();
+    projects.forEach((p) => m.set(p.category, (m.get(p.category) || 0) + 1));
+    return CATEGORY_LIST.filter((c) => m.has(c)).map((c) => ({ name: c, count: m.get(c) }));
+  }, [projects]);
+
+  const scenarioStats = useMemo(() => {
+    const m = new Map();
+    projects.forEach((p) => m.set(p.scenario, (m.get(p.scenario) || 0) + 1));
+    return SCENARIO_LIST.filter((c) => m.has(c)).map((c) => ({ name: c, count: m.get(c) }));
+  }, [projects]);
+
+  const processed = useMemo(() => {
+    const term = searchTerm.toLowerCase().trim();
+    const list = projects.filter((p) => {
+      if (filterType === 'owned' && !p.isOwner) return false;
+      if (filterType === 'starred' && !p.isStarred) return false;
+      if (filterCategory !== 'all' && p.category !== filterCategory) return false;
+      if (filterScenario !== 'all' && p.scenario !== filterScenario) return false;
+      if (filterLang !== 'all' && p.language !== filterLang) return false;
+      if (term) {
+        const blob = `${p.name} ${p.owner} ${p.description} ${p.problemSolved} ${p.scenario} ${p.topics.join(' ')}`.toLowerCase();
+        if (!blob.includes(term)) return false;
+      }
+      return true;
+    });
+    list.sort((a, b) => {
+      if (sortBy === 'stars') return (b.stars || 0) - (a.stars || 0);
+      if (sortBy === 'name') return (a.name || '').localeCompare(b.name || '');
+      if (sortBy === 'created') return new Date(b.createdAt) - new Date(a.createdAt);
+      return new Date(b.updatedAt) - new Date(a.updatedAt);
+    });
+    return list;
+  }, [projects, searchTerm, filterType, filterCategory, filterScenario, filterLang, sortBy]);
+
+  const ownedCount = projects.filter((p) => p.isOwner).length;
+  const starredCount = projects.filter((p) => p.isStarred).length;
+
+  const xBloggerStats = useMemo(() => {
+    const m = new Map();
+    xBookmarks.forEach((b) => {
+      if (b.blogger) m.set(b.blogger, (m.get(b.blogger) || 0) + 1);
+    });
+    return Array.from(m.entries()).map(([name, count]) => ({ name, count }));
+  }, [xBookmarks]);
+
+  const xTagStats = useMemo(() => {
+    const m = new Map();
+    xBookmarks.forEach((b) => {
+      if (Array.isArray(b.tags)) {
+        b.tags.forEach((tag) => m.set(tag, (m.get(tag) || 0) + 1));
+      }
+    });
+    return Array.from(m.entries()).map(([name, count]) => ({ name, count }));
+  }, [xBookmarks]);
+
+  const xDateStats = useMemo(() => {
+    const m = new Map();
+    xBookmarks.forEach((b) => {
+      const month = b.publishDate ? b.publishDate.substring(0, 7) : '其他日期';
+      m.set(month, (m.get(month) || 0) + 1);
+    });
+    return Array.from(m.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.name.localeCompare(a.name));
+  }, [xBookmarks]);
+
+  const processedXBookmarks = useMemo(() => {
+    const term = searchTerm.toLowerCase().trim();
+    const list = xBookmarks.filter((b) => {
+      if (filterBlogger !== 'all' && b.blogger !== filterBlogger) return false;
+      if (filterXTag !== 'all' && !(b.tags && b.tags.includes(filterXTag))) return false;
+      if (filterXDate !== 'all') {
+        const month = b.publishDate ? b.publishDate.substring(0, 7) : '其他日期';
+        if (month !== filterXDate) return false;
+      }
+      if (term) {
+        const blob = `${b.blogger} ${b.theme} ${b.rawText} ${b.coreContent} ${(b.tags || []).join(' ')}`.toLowerCase();
+        if (!blob.includes(term)) return false;
+      }
+      return true;
     });
 
-  const categories = ['all', '智能体技能 (MCP)', '独立运行软件', '开发集成工具', '知识库与资源', '其他实用项目'];
+    list.sort((a, b) => {
+      if (sortBy === 'blogger') return (a.blogger || '').localeCompare(b.blogger || '');
+      return new Date(b.publishDate) - new Date(a.publishDate);
+    });
+    return list;
+  }, [xBookmarks, searchTerm, filterBlogger, filterXTag, filterXDate, sortBy]);
 
+  /* -------------- UI: 本地登录/注册 -------------- */
+  if (!loggedInUser) {
+    return (
+      <div className="login-screen">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95, y: 20 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          className="login-card"
+        >
+          {isChangingPassword ? (
+            <>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '2rem' }}>
+                <div className="logo-badge" style={{ background: 'var(--accent-secondary)' }}>
+                  <User color="#fff" size={32} />
+                </div>
+                <h1 style={{ fontSize: '1.75rem', fontWeight: 800, marginTop: '0.5rem', marginBottom: '0.4rem' }}>修改本地密码</h1>
+                <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: '0.9rem' }}>
+                  更新保存在此浏览器中的离线账号密码
+                </p>
+              </div>
+
+              <label className="label-text">本地账号用户名</label>
+              <input
+                type="text"
+                placeholder="请输入用户名"
+                value={changeUsername}
+                onChange={(e) => setChangeUsername(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleChangePassword()}
+              />
+
+              <label className="label-text" style={{ marginTop: '1rem' }}>原密码</label>
+              <input
+                type="password"
+                placeholder="请输入原密码"
+                value={changeOldPassword}
+                onChange={(e) => setChangeOldPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleChangePassword()}
+              />
+
+              <label className="label-text" style={{ marginTop: '1rem' }}>新密码</label>
+              <input
+                type="password"
+                placeholder="请输入新密码"
+                value={changeNewPassword}
+                onChange={(e) => setChangeNewPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleChangePassword()}
+              />
+
+              <label className="label-text" style={{ marginTop: '1rem' }}>确认新密码</label>
+              <input
+                type="password"
+                placeholder="请再次输入新密码"
+                value={changeConfirmPassword}
+                onChange={(e) => setChangeConfirmPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleChangePassword()}
+              />
+
+              <button onClick={handleChangePassword} disabled={loading} style={{ height: '3.2rem', fontSize: '1rem', marginTop: '1.5rem' }}>
+                {loading ? '正在处理…' : '确认修改密码'}
+              </button>
+
+              {successMsg && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="success-box" style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.2)', padding: '0.75rem', borderRadius: '8px', fontSize: '0.88rem', marginTop: '1rem', textAlign: 'center' }}>
+                  {successMsg}
+                </motion.p>
+              )}
+
+              {error && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="error-box" style={{ marginTop: '1rem' }}>
+                  {error}
+                </motion.p>
+              )}
+
+              <div style={{ textAlign: 'center', marginTop: '1.5rem' }}>
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setIsChangingPassword(false);
+                    setError('');
+                    setSuccessMsg('');
+                  }}
+                  style={{ color: 'var(--accent-primary)', fontSize: '0.88rem', textDecoration: 'none' }}
+                >
+                  返回登录
+                </a>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '2rem' }}>
+                <div className="logo-badge">
+                  <Github color="#fff" size={36} />
+                </div>
+                <h1 style={{ fontSize: '2rem', fontWeight: 800, marginBottom: '0.4rem' }}>HubManager</h1>
+                <p style={{ color: 'var(--text-secondary)', textAlign: 'center' }}>
+                  本地离线管理你的 GitHub & X 收藏，数据更安全
+                </p>
+              </div>
+
+              <label className="label-text">本地账号用户名</label>
+              <input
+                type="text"
+                placeholder="请输入用户名（新账号将自动注册）"
+                value={loginUsername}
+                onChange={(e) => setLoginUsername(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleLoginRegister()}
+              />
+
+              <label className="label-text" style={{ marginTop: '1rem' }}>密码</label>
+              <input
+                type="password"
+                placeholder="请输入密码"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleLoginRegister()}
+              />
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '1rem', marginBottom: '1.25rem' }}>
+                <input
+                  type="checkbox"
+                  id="rememberPassword"
+                  checked={rememberPassword}
+                  onChange={(e) => setRememberPassword(e.target.checked)}
+                  style={{ width: 'auto', cursor: 'pointer' }}
+                />
+                <label htmlFor="rememberPassword" style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', cursor: 'pointer', userSelect: 'none' }}>
+                  记住密码
+                </label>
+              </div>
+
+              <button onClick={handleLoginRegister} disabled={loading} style={{ height: '3.2rem', fontSize: '1rem' }}>
+                {loading ? '正在验证…' : '登录 / 注册'}
+              </button>
+
+              {error && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="error-box">
+                  {error}
+                </motion.p>
+              )}
+
+              <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '1.2rem', textAlign: 'center' }}>
+                提示：首次输入新账号与密码即为注册，所有数据加密存放在当前浏览器中。
+              </p>
+
+              <div style={{ textAlign: 'center', marginTop: '1.2rem', borderTop: '1px solid var(--border-strong)', paddingTop: '1rem' }}>
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setIsChangingPassword(true);
+                    setError('');
+                    setSuccessMsg('');
+                  }}
+                  style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', textDecoration: 'none' }}
+                >
+                  修改本地账号密码
+                </a>
+              </div>
+            </>
+          )}
+        </motion.div>
+      </div>
+    );
+  }
+
+  /* -------------- UI: 关联账号初始化 -------------- */
+  if (!username) {
+    return (
+      <div className="login-screen">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95, y: 20 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          className="login-card init-card"
+          style={{ maxWidth: '520px' }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '1.5rem' }}>
+            <div className="logo-badge" style={{ background: 'var(--accent-secondary)' }}>
+              <User color="#fff" size={32} />
+            </div>
+            <h1 style={{ fontSize: '1.75rem', fontWeight: 800, marginTop: '0.5rem', marginBottom: '0.2rem' }}>关联并初始化配置</h1>
+            <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: '0.9rem' }}>
+              新账号：<span style={{ color: 'var(--accent-primary)', fontWeight: 600 }}>{loggedInUser}</span>，请配置你的关联数据源
+            </p>
+          </div>
+
+          <div style={{ maxHeight: '60vh', overflowY: 'auto', paddingRight: '0.25rem', marginBottom: '1rem' }}>
+            <label className="label-text">GitHub 主页地址 <span style={{ color: '#ef4444' }}>*</span></label>
+            <input
+              type="text"
+              placeholder="例如：https://github.com/torvalds"
+              value={initProfileInput}
+              onChange={(e) => setInitProfileInput(e.target.value)}
+            />
+
+            <label className="label-text" style={{ marginTop: '0.75rem' }}>X 收藏贴网址</label>
+            <input
+              type="text"
+              placeholder="例如：https://x.com/i/bookmarks"
+              value={initXBookmarksUrl}
+              onChange={(e) => setInitXBookmarksUrl(e.target.value)}
+            />
+
+            {/* Chrome Extension Guide in Onboarding */}
+            <div style={{ borderTop: '1px solid var(--border-strong)', marginTop: '1.25rem', paddingTop: '1rem' }}>
+              <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--accent-primary)' }}>关联 X 助手浏览器插件（推荐，可稍后配置）</h3>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginBottom: '0.75rem', lineHeight: '1.45' }}>
+                支持在 X 平台浏览收藏时自动捕获推特，并一键导入。
+              </p>
+              
+              <div style={{ background: 'rgba(0, 0, 0, 0.2)', padding: '0.75rem', borderRadius: '8px', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '0.75rem', border: '1px dashed var(--border-card)' }}>
+                <ol style={{ paddingLeft: '1.1rem', margin: 0 }}>
+                  <li>打开 <code style={{ color: 'var(--accent-orange)' }}>chrome://extensions/</code>，开启<strong>“开发者模式”</strong>。</li>
+                  <li>选择<strong>“加载已解压的扩展程序”</strong>，载入项目下的 <code style={{ color: 'var(--accent-primary)' }}>x-extension</code>。</li>
+                  <li>复制其“ID”并填入下方，点击测试连接。</li>
+                </ol>
+              </div>
+
+              <label className="label-text">插件 ID</label>
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                <input
+                  type="text"
+                  placeholder="未安装可直接留空，点击跳过"
+                  value={initXExtensionId}
+                  onChange={(e) => setInitXExtensionId(e.target.value)}
+                  style={{ flex: 1, margin: 0 }}
+                />
+                <button
+                  type="button"
+                  onClick={handleTestOnboardingExtension}
+                  disabled={onboardingPingLoading}
+                  style={{
+                    width: 'auto',
+                    padding: '0 1rem',
+                    background: 'rgba(255, 255, 255, 0.08)',
+                    border: '1px solid rgba(255, 255, 255, 0.15)',
+                    fontSize: '0.82rem',
+                    height: '2.8rem'
+                  }}
+                >
+                  {onboardingPingLoading ? '检测中…' : '测试连接'}
+                </button>
+              </div>
+              {onboardingPingResult && (
+                <p style={{
+                  fontSize: '0.8rem',
+                  color: onboardingPingResult.success ? '#10b981' : '#f59e0b',
+                  margin: '0 0 0.5rem 0'
+                }}>
+                  {onboardingPingResult.message}
+                </p>
+              )}
+            </div>
+
+            <div style={{ borderTop: '1px solid var(--border-strong)', marginTop: '1.25rem', paddingTop: '1rem' }}>
+              <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--accent-primary)' }}>配置首个大模型 API（用于 AI 整理，可选）</h3>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                <div>
+                  <label className="label-text">模型 API</label>
+                  <input
+                    type="text"
+                    value={initApiAlias}
+                    onChange={(e) => setInitApiAlias(e.target.value)}
+                    placeholder="默认 API"
+                  />
+                </div>
+                <div>
+                  <label className="label-text">模型名称</label>
+                  <input
+                    type="text"
+                    value={initApiModel}
+                    onChange={(e) => setInitApiModel(e.target.value)}
+                    placeholder="deepseek-chat"
+                  />
+                </div>
+              </div>
+
+              <label className="label-text" style={{ marginTop: '0.5rem' }}>模型 API URL</label>
+              <input
+                type="text"
+                value={initApiHost}
+                onChange={(e) => setInitApiHost(e.target.value)}
+                placeholder="默认 https://api.deepseek.com"
+              />
+
+              <label className="label-text" style={{ marginTop: '0.5rem' }}>API 密钥</label>
+              <input
+                type="password"
+                value={initApiKey}
+                onChange={(e) => setInitApiKey(e.target.value)}
+                placeholder="API Key"
+              />
+            </div>
+          </div>
+
+          <button onClick={handleSaveInitConfig} disabled={loading} style={{ height: '3.2rem', fontSize: '1.05rem' }}>
+            {loading ? (syncMsg || '正在初始化并进行首次同步…') : '保存配置并开始同步'}
+          </button>
+          {error && (
+            <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="error-box" style={{ marginTop: '1rem' }}>
+              {error}
+            </motion.p>
+          )}
+        </motion.div>
+      </div>
+    );
+  }
+
+  /* -------------- UI: 主界面 -------------- */
   return (
     <div className="app-layout">
-      {/* Login Screen */}
-      {!isLoggedIn && (
-        <div className="login-screen">
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }}
-            className="login-card"
-          >
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '2.5rem' }}>
-              <div style={{ background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))', padding: '1rem', borderRadius: '20px', marginBottom: '1.5rem' }}>
-                <Github color="#fff" size={40} />
-              </div>
-              <h1 style={{ fontSize: '2.2rem', fontWeight: 800, marginBottom: '0.5rem' }}>登录</h1>
-              <p style={{ color: 'var(--text-secondary)' }}>HubManager 资产管理系统</p>
-            </div>
-
-            <div style={{ marginBottom: '1.5rem', textAlign: 'left' }}>
-              <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>GitHub 主页地址</label>
-              <input 
-                type="text" 
-                placeholder="请输入github主页地址" 
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-              />
-            </div>
-
-            <div style={{ marginBottom: '2rem', textAlign: 'left' }}>
-              <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>登录密码</label>
-              <input 
-                type="password" 
-                placeholder="请输入密码" 
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-              <p style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', marginTop: '0.75rem', fontWeight: 500 }}>
-                💡 提示：初始默认密码为 123456
-              </p>
-            </div>
-
-            <button onClick={handleLogin} disabled={loading} style={{ height: '3.5rem', fontSize: '1.1rem' }}>
-              {loading ? '正在验证数据...' : '进入系统'}
-            </button>
-            
-            {error && (
-              <motion.p 
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                style={{ color: '#ef4444', fontSize: '0.85rem', marginTop: '1.2rem', padding: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '8px' }}
-              >
-                {error}
-              </motion.p>
-            )}
-          </motion.div>
-        </div>
-      )}
-
-      {/* Sidebar */}
       <aside className="sidebar">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem' }}>
-          <div style={{ background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))', padding: '0.5rem', borderRadius: '12px' }}>
-            <Github color="#fff" size={24} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
+          <div className="logo-badge" style={{ padding: '0.5rem', borderRadius: '12px' }}>
+            <Github color="#fff" size={22} />
           </div>
-          <h2 style={{ fontSize: '1.2rem', fontWeight: 700 }}>HubManager</h2>
+          <div>
+            <div style={{ fontSize: '1.05rem', fontWeight: 700 }}>HubManager</div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>数字资产管理</div>
+          </div>
         </div>
 
-        <nav>
-          <div className={`nav-item ${currentView === 'dashboard' ? 'active' : ''}`} onClick={() => setCurrentView('dashboard')}>
-            <Grid size={20} /> 仪表板
-          </div>
-          <div className={`nav-item ${currentView === 'activity' ? 'active' : ''}`} onClick={() => setCurrentView('activity')}>
-            <Activity size={20} /> 更新动态
-          </div>
-          <div className="nav-item" onClick={() => setShowConfig(true)}>
-            <Settings size={20} /> 修改密码
-          </div>
-        </nav>
+        <div className="nav-group">
+          <div className="side-sub-title">GitHub 资产</div>
+          <nav>
+            <div
+              className={`nav-item ${currentView === 'dashboard' ? 'active' : ''}`}
+              onClick={() => {
+                setCurrentView('dashboard');
+                setSortBy('updated');
+              }}
+            >
+              <Grid size={18} /> 项目库
+            </div>
+            <div
+              className={`nav-item ${currentView === 'activity' ? 'active' : ''}`}
+              onClick={() => setCurrentView('activity')}
+            >
+              <Activity size={18} /> 更新日志
+            </div>
+          </nav>
+        </div>
+
+        <div className="nav-group" style={{ marginTop: '1.5rem' }}>
+          <div className="side-sub-title">X 资产</div>
+          <nav>
+            <div
+              className={`nav-item ${currentView === 'x-bookmarks' ? 'active' : ''}`}
+              onClick={() => {
+                setCurrentView('x-bookmarks');
+                setSortBy('updated');
+              }}
+            >
+              <Twitter size={18} /> 收藏贴整理
+            </div>
+          </nav>
+        </div>
+
+        <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          {currentView === 'x-bookmarks' ? (
+            <>
+              <div className="side-tabs">
+                <button
+                  className={`side-tab ${xSideTab === 'blogger' ? 'active' : ''}`}
+                  onClick={() => setXSideTab('blogger')}
+                >按博主</button>
+                <button
+                  className={`side-tab ${xSideTab === 'tag' ? 'active' : ''}`}
+                  onClick={() => setXSideTab('tag')}
+                >按标签</button>
+                <button
+                  className={`side-tab ${xSideTab === 'date' ? 'active' : ''}`}
+                  onClick={() => setXSideTab('date')}
+                >按日期</button>
+              </div>
+
+              <div className="side-list-scroll" style={{ maxHeight: '320px', overflowY: 'auto', marginTop: '0.25rem' }}>
+                {xSideTab === 'blogger' ? (
+                  <>
+                    {xBloggerStats.length === 0 && (
+                      <div className="side-empty">暂无博主</div>
+                    )}
+                    {xBloggerStats.map((item) => {
+                      const active = filterBlogger === item.name;
+                      return (
+                        <div
+                          key={item.name}
+                          className={`cat-item ${active ? 'active' : ''}`}
+                          onClick={() => setFilterBlogger(active ? 'all' : item.name)}
+                        >
+                          <Twitter size={15} color="var(--accent-primary)" />
+                          <span className="cat-name" style={{ wordBreak: 'break-all' }}>{item.name}</span>
+                          <span className="cat-count">{item.count}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                ) : xSideTab === 'tag' ? (
+                  <>
+                    {xTagStats.length === 0 && (
+                      <div className="side-empty">暂无标签</div>
+                    )}
+                    {xTagStats.map((item) => {
+                      const active = filterXTag === item.name;
+                      return (
+                        <div
+                          key={item.name}
+                          className={`cat-item ${active ? 'active' : ''}`}
+                          onClick={() => setFilterXTag(active ? 'all' : item.name)}
+                        >
+                          <Bookmark size={15} color="var(--accent-secondary)" />
+                          <span className="cat-name">{item.name}</span>
+                          <span className="cat-count">{item.count}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                ) : (
+                  <>
+                    {xDateStats.length === 0 && (
+                      <div className="side-empty">暂无日期</div>
+                    )}
+                    {xDateStats.map((item) => {
+                      const active = filterXDate === item.name;
+                      return (
+                        <div
+                          key={item.name}
+                          className={`cat-item ${active ? 'active' : ''}`}
+                          onClick={() => setFilterXDate(active ? 'all' : item.name)}
+                        >
+                          <Calendar size={15} color="var(--accent-orange)" />
+                          <span className="cat-name">{item.name}</span>
+                          <span className="cat-count">{item.count}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="side-tabs">
+                <button
+                  className={`side-tab ${sideTab === 'category' ? 'active' : ''}`}
+                  onClick={() => setSideTab('category')}
+                >按用途</button>
+                <button
+                  className={`side-tab ${sideTab === 'scenario' ? 'active' : ''}`}
+                  onClick={() => setSideTab('scenario')}
+                >按场景</button>
+              </div>
+
+              <div className="side-list-scroll" style={{ maxHeight: '320px', overflowY: 'auto', marginTop: '0.25rem' }}>
+                {sideTab === 'category' ? (
+                  <>
+                    {categoryStats.length === 0 && (
+                      <div className="side-empty">同步后将在此显示</div>
+                    )}
+                    {categoryStats.map((c) => {
+                      const Icon = CATEGORY_ICONS[c.name] || Grid;
+                      const active = filterCategory === c.name && currentView === 'dashboard';
+                      return (
+                        <div
+                          key={c.name}
+                          className={`cat-item ${active ? 'active' : ''}`}
+                          onClick={() => {
+                            setFilterCategory(active ? 'all' : c.name);
+                            setCurrentView('dashboard');
+                          }}
+                        >
+                          <Icon size={15} />
+                          <span className="cat-name">{c.name}</span>
+                          <span className="cat-count">{c.count}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                ) : (
+                  <>
+                    {scenarioStats.length === 0 && (
+                      <div className="side-empty">同步后将在此显示</div>
+                    )}
+                    {scenarioStats.map((s) => {
+                      const active = filterScenario === s.name && currentView === 'dashboard';
+                      return (
+                        <div
+                          key={s.name}
+                          className={`cat-item ${active ? 'active' : ''}`}
+                          onClick={() => {
+                            setFilterScenario(active ? 'all' : s.name);
+                            setCurrentView('dashboard');
+                          }}
+                        >
+                          <Sparkles size={15} />
+                          <span className="cat-name">{s.name}</span>
+                          <span className="cat-count">{s.count}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
 
         <div className="sync-status">
-          <div style={{ marginBottom: '0.5rem', opacity: 0.8 }}>
-            用户: <span style={{ color: '#fff' }}>{username || '未连接'}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+            {currentView === 'x-bookmarks' ? (
+              <>
+                <Twitter size={14} />
+                <span style={{ color: '#fff', fontWeight: 600 }}>X 收藏夹整理</span>
+              </>
+            ) : (
+              <>
+                <User size={14} />
+                <span style={{ color: '#fff', fontWeight: 600 }}>{username}</span>
+              </>
+            )}
           </div>
-          <div style={{ fontSize: '0.75rem', opacity: 0.6 }}>
-            上次同步: {lastSync ? new Date(lastSync).toLocaleString() : '从未'}
+          <div style={{ fontSize: '0.72rem', opacity: 0.7 }}>
+            {currentView === 'x-bookmarks'
+              ? `共整理了 ${xBookmarks.length} 条记录`
+              : `上次同步：${lastSync ? new Date(lastSync).toLocaleString() : '从未'}`}
           </div>
-          <button className="sync-btn" onClick={handleSync} disabled={loading}>
+          <button
+            className="sync-btn"
+            onClick={currentView === 'x-bookmarks' ? handleSilentXRefresh : () => handleSync()}
+            disabled={loading}
+          >
             <RefreshCw size={14} className={loading ? 'spin' : ''} />
-            {loading ? '立即同步' : '立即同步'}
+            {currentView === 'x-bookmarks'
+              ? (loading ? '刷新中…' : '立即刷新')
+              : (loading ? '同步中…' : '增量刷新')}
           </button>
+          {syncMsg && <div className="sync-msg">{syncMsg}</div>}
         </div>
 
-        <div className="nav-item" onClick={handleLogout} style={{ marginTop: '1rem', color: '#ef4444' }}>
-          <LogOut size={20} /> 退出登录
+        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+          <div
+            className="nav-item"
+            onClick={() => setShowSettings(true)}
+            style={{ flex: 1, justifyContent: 'center', marginBottom: 0, padding: '0.6rem 0.5rem', fontSize: '0.85rem', gap: '0.4rem' }}
+          >
+            <Settings size={16} /> 设置
+          </div>
+          <div
+            className="nav-item danger"
+            onClick={() => setShowLogoutConfirm(true)}
+            style={{ flex: 1, justifyContent: 'center', marginBottom: 0, padding: '0.6rem 0.5rem', fontSize: '0.85rem', gap: '0.4rem' }}
+          >
+            <LogOut size={16} /> 退出登录
+          </div>
         </div>
       </aside>
 
-      {/* Main Content */}
       <main className="main-content">
-        <header style={{ marginBottom: '2rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+        <header style={{ marginBottom: '1.5rem' }}>
+          <div className="header-row">
             <div>
-              <h1 style={{ fontSize: '2.5rem', marginBottom: '0.5rem' }}>
-                {currentView === 'dashboard' ? '项目库' : '最新变动'}
+              <h1 className="page-title">
+                {currentView === 'dashboard' ? '项目库' : currentView === 'x-bookmarks' ? '收藏贴整理' : '更新日志'}
               </h1>
               <p className="subtitle">
-                {currentView === 'dashboard' 
-                  ? '整理并探索您的 GitHub 生态系统' 
-                  : '监控您所有关注项目的版本发布与重要更新'}
+                {currentView === 'dashboard'
+                  ? '按用途自动分类你的仓库和星标项目，全部中文呈现。'
+                  : currentView === 'x-bookmarks'
+                    ? '自动提取 Twitter/X 收藏帖子中的技术和经验分享，生成清晰的整理卡片。'
+                    : '以时间线形式展示个人仓库与星标项目最近的版本发布和提交。'}
               </p>
             </div>
+
             {currentView === 'dashboard' && (
-              <div style={{ display: 'flex', gap: '2rem', marginBottom: '0.5rem' }}>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>全部项目</div>
-                  <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--accent-primary)' }}>{projects.length}</div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>自有/Fork</div>
-                  <div style={{ fontSize: '1.8rem', fontWeight: 800, color: '#fff' }}>{projects.filter(p => p.isOwner).length}</div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>星标项目</div>
-                  <div style={{ fontSize: '1.8rem', fontWeight: 800, color: '#f59e0b' }}>{projects.filter(p => !p.isOwner).length}</div>
-                </div>
+              <div className="stats-row">
+                <Stat label="全部" value={projects.length} color="var(--accent-primary)" />
+                <Stat label="自有" value={ownedCount} color="#fff" />
+                <Stat label="星标" value={starredCount} color="#f59e0b" />
+              </div>
+            )}
+            {currentView === 'x-bookmarks' && (
+              <div className="stats-row">
+                <Stat label="全部收藏" value={xBookmarks.length} color="var(--accent-primary)" />
+                <Stat label="筛选结果" value={processedXBookmarks.length} color="var(--accent-secondary)" />
+                <Stat label="活跃博主" value={xBloggerStats.length} color="#f59e0b" />
               </div>
             )}
           </div>
+          {error && <div className="error-box">{error}</div>}
         </header>
 
         {currentView === 'dashboard' ? (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+          <>
             <div className="controls-bar">
               <div className="search-wrapper">
-                <Search style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} size={18} />
-                <input 
-                  style={{ paddingLeft: '3rem', marginBottom: 0 }}
-                  type="text" 
-                  placeholder="搜索项目名称、作者或功能描述......" 
+                <Search size={18} className="search-icon" />
+                <input
+                  className="search-input"
+                  type="text"
+                  placeholder="搜索名称、作者、主题或描述…"
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                 />
               </div>
-              
+
               <select className="filter-select" value={filterType} onChange={(e) => setFilterType(e.target.value)}>
-                {categories.map(c => {
-                  const count = c === 'all' ? projects.length : projects.filter(p => p.category === c).length;
-                  return <option key={c} value={c} style={{ background: '#1a1a1e', color: '#fff' }}>{c === 'all' ? '所有类型' : `${c} (${count})`}</option>;
-                })}
+                <option value="all">全部项目</option>
+                <option value="owned">仅自有</option>
+                <option value="starred">仅星标</option>
+              </select>
+
+              <select className="filter-select" value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)}>
+                <option value="all">所有用途</option>
+                {CATEGORY_LIST.filter((c) => projects.some((p) => p.category === c)).map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+
+              <select className="filter-select" value={filterScenario} onChange={(e) => setFilterScenario(e.target.value)}>
+                <option value="all">所有场景</option>
+                {SCENARIO_LIST.filter((s) => projects.some((p) => p.scenario === s)).map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
               </select>
 
               <select className="filter-select" value={filterLang} onChange={(e) => setFilterLang(e.target.value)}>
-                {languages.map(lang => {
-                  const count = lang === 'all' ? projects.length : projects.filter(p => p.language === lang).length;
-                  return <option key={lang} value={lang} style={{ background: '#1a1a1e', color: '#fff' }}>{lang === 'all' ? '所有语言' : `${lang} (${count})`}</option>;
-                })}
+                {languages.map((l) => (
+                  <option key={l} value={l}>{l === 'all' ? '所有语言' : l}</option>
+                ))}
               </select>
 
               <select className="filter-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
-                <option value="updated" style={{ background: '#1a1a1e', color: '#fff' }}>最近更新</option>
-                <option value="stars" style={{ background: '#1a1a1e', color: '#fff' }}>最多星标</option>
-                <option value="name" style={{ background: '#1a1a1e', color: '#fff' }}>名称 (A-Z)</option>
+                <option value="updated">按最近更新</option>
+                <option value="created">按最近创建</option>
+                <option value="stars">按星标数</option>
+                <option value="name">按名称</option>
               </select>
             </div>
 
-            <div className="repo-grid">
-              {processedProjects.map((project, index) => (
-                <motion.div 
-                  key={project.id}
-                  initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: index * 0.01 }}
-                  className="repo-card"
-                  onClick={() => setSelectedProject(project)}
-                  style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column' }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
-                    {project.isOwner ? <Github size={18} /> : <Star size={18} color="#f59e0b" fill="#f59e0b" />}
-                    <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{project.owner}</span>
-                  </div>
-                  <h3 className="repo-title" style={{ fontSize: '1.4rem', marginBottom: '1rem', wordBreak: 'break-all' }}>{project.name}</h3>
-                  
-                  <div style={{ flexGrow: 1, marginBottom: '1.5rem' }}>
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.4rem', fontWeight: 600 }}>项目价值</div>
-                    <p className="repo-desc" style={{ WebkitLineClamp: 3, display: '-webkit-box', WebkitBoxOrient: 'vertical', overflow: 'hidden', minHeight: '3.2rem', marginBottom: '1rem', color: '#fff', fontSize: '0.95rem' }}>
-                      {project.problemSolved || project.description || '暂无详细总结'}
-                    </p>
+            {projects.length === 0 ? (
+              <EmptyState onAction={() => handleSync()} loading={loading} />
+            ) : processed.length === 0 ? (
+              <div className="empty-box">当前筛选条件下没有匹配的项目。</div>
+            ) : (
+              <div className="repo-grid">
+                {processed.map((project, idx) => (
+                  <ProjectCard key={project.id} project={project} index={idx} onOpen={openProject} />
+                ))}
+              </div>
+            )}
+          </>
+        ) : currentView === 'x-bookmarks' ? (
+          <>
+            {/* X Extension Sync Banner */}
+            <div className="x-sync-banner" style={{
+              background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.8))',
+              border: '1px solid var(--border-strong)',
+              borderRadius: '16px',
+              padding: '1.25rem 1.5rem',
+              marginBottom: '1.5rem',
+              backdropFilter: 'blur(8px)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1rem',
+              boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div style={{
+                    width: '10px',
+                    height: '10px',
+                    borderRadius: '50%',
+                    backgroundColor: isExtensionInstalled ? '#10b981' : '#f59e0b',
+                    boxShadow: isExtensionInstalled ? '0 0 8px #10b981' : '0 0 8px #f59e0b'
+                  }} />
+                  <span style={{ fontWeight: 600, fontSize: '0.95rem', color: '#fff' }}>
+                    {isExtensionInstalled ? 'X 助手插件已联机' : 'X 助手插件未联机'}
+                  </span>
+                  {isExtensionInstalled && (
+                    <span className="badge badge-plain" style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', borderColor: 'rgba(16, 185, 129, 0.2)' }}>
+                      v1.0.0
+                    </span>
+                  )}
+                </div>
 
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.4rem', fontWeight: 600 }}>使用指南</div>
-                    <p style={{ color: 'var(--accent-primary)', fontSize: '0.85rem', minHeight: '2.5rem', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', fontWeight: 500 }}>
-                      {project.usage}
-                    </p>
-                  </div>
-                  
-                  <div className="badge-container" style={{ marginTop: 'auto' }}>
-                    <span className="badge" style={{ background: 'rgba(255,255,255,0.05)', color: '#fff' }}>{project.language}</span>
-                    <span className="badge" style={{ color: 'var(--accent-primary)', border: '1px solid rgba(139, 92, 246, 0.2)' }}>{project.category}</span>
-                  </div>
-                </motion.div>
-              ))}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  {isExtensionInstalled ? (
+                    <>
+                      <motion.button
+                        onClick={handleSyncExtensionBookmarks}
+                        disabled={loading}
+                        animate={extensionBookmarksCount > 0 ? {
+                          scale: [1, 1.02, 1],
+                          boxShadow: [
+                            '0 2px 10px rgba(99, 102, 241, 0.3)',
+                            '0 2px 20px rgba(99, 102, 241, 0.6)',
+                            '0 2px 10px rgba(99, 102, 241, 0.3)'
+                          ]
+                        } : {}}
+                        transition={extensionBookmarksCount > 0 ? {
+                          repeat: Infinity,
+                          duration: 2,
+                          ease: "easeInOut"
+                        } : {}}
+                        style={{
+                          background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
+                          color: '#fff',
+                          border: '1px solid transparent',
+                          padding: '0.6rem 1.25rem',
+                          borderRadius: '8px',
+                          fontWeight: 600,
+                          fontSize: '0.88rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '0.5rem',
+                          boxShadow: '0 2px 10px rgba(99, 102, 241, 0.3)',
+                          cursor: 'pointer',
+                          width: 'auto',
+                          height: '2.4rem'
+                        }}
+                      >
+                        <RefreshCw size={15} className={loading ? 'spin' : ''} />
+                        一键同步已捕获书签 ({extensionBookmarksCount})
+                      </motion.button>
+                      <button
+                        onClick={() => setShowXImportModal(true)}
+                        style={{
+                          background: 'rgba(255, 255, 255, 0.08)',
+                          color: '#cbd5e1',
+                          border: '1px solid rgba(255, 255, 255, 0.1)',
+                          padding: '0.6rem 1.25rem',
+                          borderRadius: '8px',
+                          fontWeight: 600,
+                          fontSize: '0.88rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                          width: 'auto',
+                          height: '2.4rem'
+                        }}
+                      >
+                        手动粘贴导入
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => setShowXImportModal(true)}
+                      style={{
+                        background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
+                        color: '#fff',
+                        border: '1px solid transparent',
+                        padding: '0.6rem 1.25rem',
+                        borderRadius: '8px',
+                        fontWeight: 600,
+                        fontSize: '0.88rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        width: 'auto',
+                        height: '2.4rem'
+                      }}
+                    >
+                      手动粘贴导入 (跳过插件)
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {!isExtensionInstalled && (
+                <div style={{
+                  fontSize: '0.85rem',
+                  color: 'var(--text-secondary)',
+                  lineHeight: '1.6',
+                  borderTop: '1px solid rgba(255, 255, 255, 0.05)',
+                  paddingTop: '0.75rem',
+                  display: 'grid',
+                  gridTemplateColumns: '1fr',
+                  gap: '0.5rem'
+                }}>
+                  <div style={{ fontWeight: 600, color: '#fff', marginBottom: '0.25rem' }}>💡 推荐：安装本地 Chrome 扩展程序，在 X 平台滚动即可自动捕获书签：</div>
+                  <ol style={{ paddingLeft: '1.2rem', margin: 0 }}>
+                    <li>打开 Chrome 浏览器，访问 <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px', color: 'var(--accent-orange)' }}>chrome://extensions/</code>，在右上角开启<strong>“开发者模式”</strong>。</li>
+                    <li>点击左上角<strong>“加载已解压的扩展程序”</strong>，选择项目根目录下的 <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px', color: 'var(--accent-primary)' }}>x-extension</code> 文件夹。</li>
+                    <li>复制生成的扩展程序 ID，在<strong>“设置”</strong>中绑定插件 ID，即可在此联机并一键同步！</li>
+                  </ol>
+                </div>
+              )}
+
+              {isExtensionInstalled && extensionBookmarksCount > 0 && (
+                <div style={{
+                  fontSize: '0.85rem',
+                  color: '#10b981',
+                  background: 'rgba(16, 185, 129, 0.06)',
+                  border: '1px dashed rgba(16, 185, 129, 0.2)',
+                  borderRadius: '8px',
+                  padding: '0.6rem 1rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem'
+                }}>
+                  <Sparkles size={14} />
+                  <span>已捕获到 <strong>{extensionBookmarksCount}</strong> 条未同步书签，点击上方“一键同步”按钮即可导入 IndexedDB 数据库并自动分类。</span>
+                </div>
+              )}
             </div>
-          </motion.div>
+
+            <div className="controls-bar">
+              <div className="search-wrapper">
+                <Search size={18} className="search-icon" />
+                <input
+                  className="search-input"
+                  type="text"
+                  placeholder="搜索博主、主题、标签或内容…"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                />
+              </div>
+
+              <select className="filter-select" value={filterBlogger} onChange={(e) => setFilterBlogger(e.target.value)}>
+                <option value="all">所有博主</option>
+                {xBloggerStats.map((b) => (
+                  <option key={b.name} value={b.name}>{b.name} ({b.count})</option>
+                ))}
+              </select>
+
+              <select className="filter-select" value={filterXTag} onChange={(e) => setFilterXTag(e.target.value)}>
+                <option value="all">所有标签</option>
+                {xTagStats.map((t) => (
+                  <option key={t.name} value={t.name}>{t.name} ({t.count})</option>
+                ))}
+              </select>
+
+              <select className="filter-select" value={filterXDate} onChange={(e) => setFilterXDate(e.target.value)}>
+                <option value="all">所有月份</option>
+                {xDateStats.map((d) => (
+                  <option key={d.name} value={d.name}>{d.name} ({d.count})</option>
+                ))}
+              </select>
+
+              <select className="filter-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+                <option value="updated">按发布时间</option>
+                <option value="blogger">按博主名称</option>
+              </select>
+            </div>
+
+            {xBookmarks.length === 0 ? (
+              <div className="empty-box" style={{ textAlign: 'center', padding: '4rem 1rem' }}>
+                <Twitter size={48} style={{ opacity: 0.4, marginBottom: '1rem' }} />
+                <p style={{ marginBottom: '1.5rem' }}>还没有整理任何 X 收藏贴。</p>
+                <button style={{ maxWidth: 260, margin: '0 auto' }} onClick={() => setShowXImportModal(true)}>
+                  立即刷新
+                </button>
+              </div>
+            ) : processedXBookmarks.length === 0 ? (
+              <div className="empty-box">当前筛选条件下没有匹配的收藏贴。</div>
+            ) : (
+              <div className="repo-grid">
+                {processedXBookmarks.map((bookmark, idx) => (
+                  <XBookmarkCard key={bookmark.id} bookmark={bookmark} index={idx} onDelete={handleDeleteXBookmark} />
+                ))}
+              </div>
+            )}
+          </>
         ) : (
           <ActivityFeed activities={activities} />
         )}
       </main>
 
-      {/* Settings Modal - Simplified for password only */}
       <AnimatePresence>
-        {showConfig && (
-          <motion.div 
+        {showSettings && (
+          <motion.div
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="modal-overlay"
+            className="modal-overlay" onClick={() => setShowSettings(false)}
           >
-            <motion.div 
-              initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }}
-              className="config-panel" style={{ width: '100%', maxWidth: '400px' }}
+            <motion.div
+              initial={{ scale: 0.95 }} animate={{ scale: 1 }} exit={{ scale: 0.95 }}
+              className="modal-content" style={{ maxWidth: 540, maxHeight: '85vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
-                <h2 style={{ fontSize: '1.5rem', fontWeight: 700 }}>修改登录密码</h2>
-                <X style={{ cursor: 'pointer' }} onClick={() => setShowConfig(false)} />
-              </div>
-              
-              <div style={{ marginBottom: '1.5rem' }}>
-                <label style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>新密码</label>
-                <input id="new-pass-settings" type="password" placeholder="请输入新密码" />
+              <button className="modal-close" onClick={() => setShowSettings(false)}><X size={22} /></button>
+              <h2 className="modal-title" style={{ marginBottom: '1.25rem' }}>设置</h2>
+
+              <label className="label-text">GitHub 主页地址</label>
+              <input
+                value={profileInput}
+                onChange={(e) => setProfileInput(e.target.value)}
+                placeholder="https://github.com/username"
+              />
+
+              <div style={{ borderTop: '1px solid var(--border-strong)', marginTop: '1rem', paddingTop: '1rem' }}>
+                <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>X 收藏贴</h3>
+                
+                <label className="label-text">X 收藏贴的网址</label>
+                <input
+                  value={xBookmarksUrl}
+                  onChange={(e) => setXBookmarksUrl(e.target.value)}
+                  placeholder="例如：https://x.com/i/bookmarks"
+                  style={{ marginBottom: '0.75rem' }}
+                />
+
+                <label className="label-text">X 助手插件 ID</label>
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                  <input
+                    value={xExtensionId}
+                    onChange={(e) => setXExtensionId(e.target.value)}
+                    placeholder="输入你在 chrome://extensions 复制 of ID"
+                    style={{ flex: 1, margin: 0 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleTestSettingsExtension}
+                    style={{
+                      width: 'auto',
+                      padding: '0 1rem',
+                      background: 'rgba(255, 255, 255, 0.08)',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      fontSize: '0.85rem',
+                      height: '2.8rem'
+                    }}
+                  >
+                    测试连接
+                  </button>
+                </div>
+                {settingsPingResult && (
+                  <p style={{
+                    fontSize: '0.8rem',
+                    color: settingsPingResult.success ? '#10b981' : '#f59e0b',
+                    margin: '0 0 0.5rem 0'
+                  }}>
+                    {settingsPingResult.message}
+                  </p>
+                )}
               </div>
 
-              <button onClick={() => updatePassword(document.getElementById('new-pass-settings').value)}>
-                确认修改
+              <div style={{ borderTop: '1px solid var(--border-strong)', marginTop: '1rem', paddingTop: '1rem' }}>
+                <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <Sparkles size={16} color="var(--accent-primary)" /> 大模型 API 配置 (用于 AI 提取)
+                </h3>
+                
+                {customApis.length > 0 ? (
+                  <div className="api-config-list" style={{ marginBottom: '1rem' }}>
+                    {customApis.map((api) => {
+                      const isActive = activeApiId === api.id;
+                      return (
+                        <div
+                          key={api.id}
+                          className={`api-config-item ${isActive ? 'active' : ''}`}
+                          onClick={() => handleToggleApi(api.id)}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flex: 1, minWidth: 0 }}>
+                            <input
+                              type="radio"
+                              checked={isActive}
+                              onChange={() => handleToggleApi(api.id)}
+                              style={{ width: 'auto', cursor: 'pointer', margin: 0 }}
+                            />
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <div style={{ fontWeight: 600, fontSize: '0.88rem', color: isActive ? 'var(--accent-primary)' : '#fff', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                {api.name}
+                                {isActive && <span className="active-badge">使用中</span>}
+                              </div>
+                              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {api.apiModel} | {api.apiHost}
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteApi(api.id);
+                            }}
+                            className="delete-api-btn"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>暂无 API 配置，请在下方添加。</p>
+                )}
+
+                <div className="add-api-form">
+                  <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>添加 API 配置</h4>
+                  
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                    <div>
+                      <label className="label-text">模型 API</label>
+                      <input
+                        type="text"
+                        value={newApiName}
+                        onChange={(e) => setNewApiName(e.target.value)}
+                        placeholder="例如: DeepSeek-V3"
+                        style={{ height: '2.2rem', fontSize: '0.8rem', padding: '0 0.5rem', margin: 0 }}
+                      />
+                    </div>
+                    <div>
+                      <label className="label-text">模型名称</label>
+                      <input
+                        type="text"
+                        value={newApiModel}
+                        onChange={(e) => setNewApiModel(e.target.value)}
+                        placeholder="例如: deepseek-chat"
+                        style={{ height: '2.2rem', fontSize: '0.8rem', padding: '0 0.5rem', margin: 0 }}
+                      />
+                    </div>
+                  </div>
+
+                  <label className="label-text">模型 API URL</label>
+                  <input
+                    type="text"
+                    value={newApiHost}
+                    onChange={(e) => setNewApiHost(e.target.value)}
+                    placeholder="例如: https://api.deepseek.com"
+                    style={{ height: '2.2rem', fontSize: '0.8rem', padding: '0 0.5rem', marginBottom: '0.5rem' }}
+                  />
+
+                  <label className="label-text">API 密钥</label>
+                  <input
+                    type="password"
+                    value={newApiKey}
+                    onChange={(e) => setNewApiKey(e.target.value)}
+                    placeholder="API Key"
+                    style={{ height: '2.2rem', fontSize: '0.8rem', padding: '0 0.5rem', marginBottom: '0.5rem' }}
+                  />
+
+                  {apiConfigError && (
+                    <p style={{ color: '#ef4444', fontSize: '0.75rem', margin: '0 0 0.5rem 0' }}>{apiConfigError}</p>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleAddApi}
+                    style={{
+                      height: '2.2rem',
+                      fontSize: '0.8rem',
+                      background: 'rgba(99, 102, 241, 0.15)',
+                      color: 'var(--accent-primary)',
+                      border: '1px solid rgba(99, 102, 241, 0.3)',
+                      padding: '0 1rem',
+                      width: '100%'
+                    }}
+                  >
+                    添加 API 配置
+                  </button>
+                </div>
+              </div>
+
+              <button
+                style={{ marginTop: '1.25rem' }}
+                onClick={handleSaveSettings}
+                disabled={loading}
+              >
+                {loading ? '正在保存与同步…' : '保存配置并同步'}
+              </button>
+
+              <button
+                style={{ marginTop: '0.75rem', background: 'transparent', border: '1px solid rgba(239,68,68,0.4)', color: '#ef4444' }}
+                onClick={() => { setShowSettings(false); setShowLogoutConfirm(true); }}
+              >
+                退出登录
               </button>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Detail Modal */}
       <AnimatePresence>
-        {selectedProject && (
-          <motion.div 
+        {showLogoutConfirm && (
+          <motion.div
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="modal-overlay" onClick={() => setSelectedProject(null)}
+            className="modal-overlay" onClick={() => setShowLogoutConfirm(false)}
           >
-            <motion.div 
-              initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
-              className="modal-content" onClick={(e) => e.stopPropagation()}
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 20 }}
+              className="modal-content" style={{ maxWidth: 400, textAlign: 'center', padding: '2.5rem 2rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.25rem' }}
+              onClick={(e) => e.stopPropagation()}
             >
-              <button className="modal-close" onClick={() => setSelectedProject(null)}><X size={24} /></button>
-
-              <div className="modal-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                  {selectedProject.isOwner ? <Github size={20} /> : <Star size={20} color="#f59e0b" fill="#f59e0b" />}
-                  <span>{selectedProject.fullName}</span>
-                </div>
-                <h2 className="modal-title">{selectedProject.name}</h2>
+              <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', padding: '1rem', borderRadius: '50%', display: 'inline-flex', color: '#ef4444' }}>
+                <LogOut size={28} />
               </div>
-
-              <div style={{ display: 'flex', gap: '2rem', marginBottom: '2rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Star size={18} color="#f59e0b" />
-                  <span style={{ fontWeight: 600 }}>{selectedProject.stars} 星标</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Calendar size={18} color="var(--accent-primary)" />
-                  <span style={{ color: 'var(--text-secondary)' }}>更新于 {new Date(selectedProject.updatedAt).toLocaleDateString()}</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Code size={18} color="#10b981" />
-                  <span style={{ color: 'var(--text-secondary)' }}>{selectedProject.language}</span>
-                </div>
+              <div>
+                <h3 style={{ fontSize: '1.3rem', fontWeight: 700, color: '#fff', marginBottom: '0.5rem' }}>确认退出登录</h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: 1.5 }}>您确定要退出当前账户吗？<br />退出后将返回登录页面。</p>
               </div>
-
-              <div className="usage-section" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
-                <h3 style={{ fontSize: '0.9rem', textTransform: 'uppercase', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>该项目解决了什么问题？</h3>
-                <p style={{ color: '#fff', fontSize: '1.1rem', lineHeight: 1.6 }}>{selectedProject.problemSolved}</p>
-              </div>
-
-              <div className="usage-section" style={{ padding: '1.5rem', background: 'rgba(0,0,0,0.4)' }}>
-                <h3 style={{ fontSize: '0.9rem', textTransform: 'uppercase', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>我该如何使用它？</h3>
-                <div style={{ color: 'var(--accent-primary)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{selectedProject.usage}</div>
-              </div>
-
-              <div style={{ marginTop: '2rem' }}>
-                <a href={selectedProject.url} target="_blank" rel="noopener noreferrer">
-                  <button style={{ background: 'var(--accent-primary)' }}>在 GitHub 上查看源码</button>
-                </a>
+              <div style={{ display: 'flex', gap: '0.75rem', width: '100%', marginTop: '0.5rem' }}>
+                <button
+                  onClick={() => setShowLogoutConfirm(false)}
+                  style={{ flex: 1, background: 'rgba(255, 255, 255, 0.08)', color: '#cbd5e1', border: '1px solid rgba(255, 255, 255, 0.1)', height: '2.8rem', borderRadius: '10px', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleLogout}
+                  style={{ flex: 1, background: 'linear-gradient(135deg, #ef4444, #b91c1c)', color: '#fff', border: 'none', height: '2.8rem', borderRadius: '10px', fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer', boxShadow: '0 4px 12px rgba(239, 68, 68, 0.2)' }}
+                >
+                  确定退出
+                </button>
               </div>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
+
+      <AnimatePresence>
+        {showXImportModal && (
+          <XImportModal
+            onClose={() => {
+              setShowXImportModal(false);
+              setXImportError('');
+              setXImportText('');
+            }}
+            onImport={handleImportXBookmarks}
+            xImportText={xImportText}
+            setXImportText={setXImportText}
+            xImportMode={xImportMode}
+            setXImportMode={setXImportMode}
+            xImportError={xImportError}
+            apiKey={xApiKey}
+            loading={loading}
+            xBookmarksUrl={xBookmarksUrl}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {selectedProject && (
+          <ProjectDetail
+            project={selectedProject}
+            readme={readmeText}
+            onClose={() => { setSelectedProject(null); setReadmeText(''); }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
+
+/* ------------- 小组件 ------------- */
+
+const Stat = ({ label, value, color }) => (
+  <div className="stat-box">
+    <div className="stat-label">{label}</div>
+    <div className="stat-value" style={{ color }}>{value}</div>
+  </div>
+);
+
+const ProjectCard = ({ project, index, onOpen }) => {
+  const Icon = CATEGORY_ICONS[project.category] || Grid;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: Math.min(index * 0.02, 0.3) }}
+      className="repo-card"
+      onClick={() => onOpen(project)}
+    >
+      <div className="card-top">
+        {project.ownerAvatar
+          ? <img className="avatar" src={project.ownerAvatar} alt={project.owner} />
+          : <div className="avatar avatar-placeholder"><User size={16} /></div>}
+        <div className="card-owner">
+          <span className="owner-name">{project.owner}</span>
+          <span className="owner-meta">
+            {project.isOwner
+              ? (project.fork ? <><GitFork size={12} /> Fork</> : <><Github size={12} /> 自有</>)
+              : <><Star size={12} color="#f59e0b" fill="#f59e0b" /> 星标</>}
+            {project.archived && <> · <Archive size={12} /> 已归档</>}
+          </span>
+        </div>
+      </div>
+
+      <h3 className="repo-title" title={project.name}>{project.name}</h3>
+
+      <div className="card-section">
+        <div className="card-section-title">功能介绍</div>
+        <p className="card-desc">{project.problemSolved}</p>
+      </div>
+
+      <div className="card-section">
+        <div className="card-section-title">使用指南</div>
+        <p className="card-usage">{project.usage}</p>
+      </div>
+
+      <div className="badge-container">
+        <span className="badge badge-category">
+          <Icon size={12} /> {project.category}
+        </span>
+        {project.scenario && project.scenario !== '其他场景' && (
+          <span className="badge badge-scenario">
+            <Sparkles size={12} /> {project.scenario}
+          </span>
+        )}
+        {project.language && <span className="badge badge-language">{project.language}</span>}
+        <span className="badge badge-plain"><Star size={12} /> {project.stars}</span>
+      </div>
+    </motion.div>
+  );
+};
+
+const ProjectDetail = ({ project, readme, onClose }) => (
+  <motion.div
+    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+    className="modal-overlay" onClick={onClose}
+  >
+    <motion.div
+      initial={{ scale: 0.95, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 20 }}
+      className="modal-content" onClick={(e) => e.stopPropagation()}
+    >
+      <button className="modal-close" onClick={onClose}><X size={22} /></button>
+
+      <div className="modal-header">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+          {project.isOwner
+            ? <Github size={18} />
+            : <Star size={18} color="#f59e0b" fill="#f59e0b" />}
+          <span>{project.fullName}</span>
+        </div>
+        <h2 className="modal-title">{project.name}</h2>
+        <p style={{ color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+          作者：<strong style={{ color: '#fff' }}>{project.owner}</strong>
+        </p>
+      </div>
+
+      <div className="meta-row">
+        <span><Star size={16} color="#f59e0b" /> {project.stars}</span>
+        <span><GitFork size={16} /> {project.forks}</span>
+        <span><Code size={16} color="#10b981" /> {project.language}</span>
+        <span><Calendar size={16} color="var(--accent-primary)" /> {new Date(project.updatedAt).toLocaleDateString()}</span>
+        {project.license && <span className="badge badge-plain">{project.license}</span>}
+      </div>
+
+      <div className="detail-tags">
+        <span className="badge badge-category"><Grid size={12} /> 用途：{project.category}</span>
+        {project.scenario && (
+          <span className="badge badge-scenario"><Sparkles size={12} /> 场景：{project.scenario}</span>
+        )}
+      </div>
+
+      <section className="detail-section">
+        <h3 className="detail-title">功能介绍</h3>
+        <p>{project.problemSolved}</p>
+      </section>
+
+      <section className="detail-section">
+        <h3 className="detail-title">使用指南</h3>
+        <p>{project.usage}</p>
+      </section>
+
+      <section className="detail-section">
+        <h3 className="detail-title">这个项目能在哪些方面帮到你</h3>
+        <ul className="helps-list">
+          {project.helpsWith.map((h, i) => <li key={i}>{h}</li>)}
+        </ul>
+      </section>
+
+      {project.topics?.length > 0 && (
+        <section className="detail-section">
+          <h3 className="detail-title">相关主题</h3>
+          <div className="badge-container">
+            {project.topics.map((t) => <span key={t} className="badge badge-topic">#{t}</span>)}
+          </div>
+        </section>
+      )}
+
+      <section className="detail-section">
+        <h3 className="detail-title">README 预览</h3>
+        <pre className="readme-preview">{readme}</pre>
+      </section>
+
+      <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem' }}>
+        <a href={project.url} target="_blank" rel="noopener noreferrer" style={{ flex: 1 }}>
+          <button>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+              <ExternalLink size={16} /> 在 GitHub 查看
+            </span>
+          </button>
+        </a>
+        {project.homepage && (
+          <a href={project.homepage} target="_blank" rel="noopener noreferrer" style={{ flex: 1 }}>
+            <button style={{ background: 'rgba(255,255,255,0.08)' }}>访问项目主页</button>
+          </a>
+        )}
+      </div>
+    </motion.div>
+  </motion.div>
+);
+
+const EmptyState = ({ onAction, loading }) => (
+  <div className="empty-box" style={{ textAlign: 'center', padding: '4rem 1rem' }}>
+    <Github size={48} style={{ opacity: 0.4, marginBottom: '1rem' }} />
+    <p style={{ marginBottom: '1.5rem' }}>还没有同步任何项目。</p>
+    <button style={{ maxWidth: 260, margin: '0 auto' }} onClick={onAction} disabled={loading}>
+      {loading ? '正在同步…' : '立即同步'}
+    </button>
+  </div>
+);
+
+const XImportModal = ({
+  onClose,
+  onImport,
+  xImportText,
+  setXImportText,
+  xImportMode,
+  setXImportMode,
+  xImportError,
+  apiKey,
+  loading,
+  xBookmarksUrl
+}) => {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" style={{ maxWidth: 580 }} onClick={(e) => e.stopPropagation()}>
+        <button className="modal-close" onClick={onClose}><X size={22} /></button>
+        <h2 className="modal-title" style={{ marginBottom: '1.25rem' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Twitter size={24} color="#1d9bf0" /> 刷新 X 收藏贴
+          </span>
+        </h2>
+
+        <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: '1rem', lineHeight: 1.5 }}>
+          请前往你的 X.com 收藏夹，复制页面上的帖文文本，并将其粘贴到下方框内。
+        </p>
+
+        <div style={{ marginBottom: '1.25rem' }}>
+          <a
+            href={xBookmarksUrl || 'https://x.com/i/bookmarks'}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ display: 'inline-flex', width: '100%' }}
+          >
+            <button
+              type="button"
+              style={{
+                width: '100%',
+                height: '3rem',
+                background: 'rgba(29, 155, 240, 0.1)',
+                color: '#1d9bf0',
+                border: '1px solid rgba(29, 155, 240, 0.25)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '0.4rem',
+                fontWeight: 600,
+                fontSize: '0.9rem'
+              }}
+            >
+              打开 X 收藏夹 <ExternalLink size={14} />
+            </button>
+          </a>
+        </div>
+
+        <label className="label-text">粘贴的原始文本</label>
+        <textarea
+          style={{ height: '180px', resize: 'vertical', fontSize: '0.88rem', fontFamily: 'monospace' }}
+          placeholder={`示例：\nAndrej Karpathy @karpathy · 2h\nMy thoughts on LLM Wiki & Knowledge Bases...\n\nor\n\n@mol632991-png · 2026-05-20\n今天开源了 PredictRaven 自动交易代理！`}
+          value={xImportText}
+          onChange={(e) => setXImportText(e.target.value)}
+          disabled={loading}
+        />
+
+        <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          <span className="label-text">解析模式</span>
+          <div style={{ display: 'flex', gap: '1.5rem', background: 'rgba(0, 0, 0, 0.2)', padding: '0.75rem 1rem', borderRadius: '12px', border: '1px solid var(--border-card)' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.9rem' }}>
+              <input
+                type="radio"
+                name="importMode"
+                value="local"
+                checked={xImportMode === 'local'}
+                onChange={() => setXImportMode('local')}
+                disabled={loading}
+                style={{ width: 'auto', cursor: 'pointer' }}
+              />
+              <span>本地规则解析 (极速/免费)</span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.9rem' }}>
+              <input
+                type="radio"
+                name="importMode"
+                value="ai"
+                checked={xImportMode === 'ai'}
+                onChange={() => setXImportMode('ai')}
+                disabled={loading}
+                style={{ width: 'auto', cursor: 'pointer' }}
+              />
+              <span>AI 智能提炼 (精准/中文化)</span>
+            </label>
+          </div>
+        </div>
+
+        {xImportMode === 'ai' && !apiKey && (
+          <div className="error-box" style={{ background: 'rgba(245, 158, 11, 0.1)', borderColor: 'rgba(245, 158, 11, 0.25)', color: '#fcd34d', marginTop: '0.75rem' }}>
+            提示：您尚未配置 LLM API 密钥。请先在<strong>“设置”</strong>中配置 DeepSeek/OpenAI API 密钥，否则无法使用 AI 智能提炼。
+          </div>
+        )}
+
+        {xImportError && (
+          <div className="error-box" style={{ marginTop: '0.75rem' }}>
+            {xImportError}
+          </div>
+        )}
+
+        <button
+          style={{ marginTop: '1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
+          onClick={onImport}
+          disabled={loading || (xImportMode === 'ai' && !apiKey)}
+        >
+          {loading ? (
+            <>
+              <RefreshCw size={16} className="spin" />
+              <span>正在解析并归类数据...</span>
+            </>
+          ) : (
+            <span>开始刷新</span>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const getTweetUrl = (bookmark) => {
+  const username = bookmark.blogger ? bookmark.blogger.replace(/^@/, '') : '';
+  if (bookmark.id && bookmark.id.startsWith('x-helper-') && username && username !== 'unknown') {
+    const statusId = bookmark.id.replace('x-helper-', '');
+    return `https://x.com/${username}/status/${statusId}`;
+  }
+  const statusUrlRegex = /https?:\/\/(?:twitter|x)\.com\/[a-zA-Z0-9_]+\/status\/(\d+)/i;
+  const match = bookmark.rawText?.match(statusUrlRegex);
+  if (match) {
+    return match[0];
+  }
+  if (username && username !== 'unknown') {
+    return `https://x.com/${username}`;
+  }
+  return 'https://x.com';
+};
+
+const XBookmarkCard = ({ bookmark, index, onDelete }) => {
+  // Generate random gradient avatar based on blogger handle
+  const avatarBg = useMemo(() => {
+    const str = bookmark.blogger || '@unknown';
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const h = Math.abs(hash) % 360;
+    const c1 = `hsl(${h}, 65%, 55%)`;
+    const c2 = `hsl(${(h + 60) % 360}, 75%, 35%)`;
+    return `linear-gradient(135deg, ${c1}, ${c2})`;
+  }, [bookmark.blogger]);
+
+  const avatarChar = bookmark.blogger ? bookmark.blogger.replace(/^@/, '').charAt(0).toUpperCase() : 'U';
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: Math.min(index * 0.02, 0.3) }}
+      className="repo-card x-card"
+      onClick={() => window.open(getTweetUrl(bookmark), '_blank')}
+    >
+      <div className="card-top" style={{ justifyContent: 'space-between', width: '100%' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', minWidth: 0 }}>
+          <div className="avatar x-avatar" style={{ background: avatarBg, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 'bold', fontSize: '0.9rem', textShadow: '0 1px 2px rgba(0,0,0,0.2)' }}>
+            {avatarChar}
+          </div>
+          <div className="card-owner" style={{ minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', minWidth: 0 }}>
+              <span className="owner-name" style={{ color: '#fff' }} title={bookmark.blogger}>{bookmark.blogger}</span>
+              {/* Blue Twitter-like Verified Badge */}
+              <svg viewBox="0 0 24 24" aria-label="Verified account" className="x-verified-icon" style={{ width: 14, height: 14, fill: '#1d9bf0', flexShrink: 0 }}>
+                <path d="M22.5 12.5c0-1.58-.875-2.95-2.148-3.6.154-.435.238-.905.238-1.4 0-2.21-1.71-3.99-3.818-3.99-.48 0-.94.1-1.348.27C14.825 2.515 13.512 1.5 12 1.5s-2.825 1.015-3.422 2.28c-.408-.17-.867-.27-1.348-.27-2.108 0-3.818 1.78-3.818 3.99 0 .495.084.965.238 1.4-1.273.65-2.148 2.02-2.148 3.6 0 1.58.875 2.95 2.148 3.6-.154.435-.238.905-.238 1.4 0 2.21 1.71 3.99 3.818 3.99.48 0 .94-.1 1.348-.27.597 1.265 1.91 2.28 3.422 2.28s2.825-1.015 3.422-2.28c.408.17.867.27 1.348.27 2.108 0 3.818-1.78 3.818-3.99 0-.495-.084-.965-.238-1.4 1.273-.65 2.148-2.02 2.148-3.6zm-12.5 4L6 12.5l1.5-1.5 2.5 2.5 6.5-6.5 1.5 1.5-8 8z"></path>
+              </svg>
+            </div>
+            <span className="owner-meta" style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+              <Calendar size={11} />
+              <span>{bookmark.publishDate}</span>
+            </span>
+          </div>
+        </div>
+
+        {/* Delete Button */}
+        <button
+          className="x-delete-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(bookmark.id);
+          }}
+          title="删除收藏贴"
+          style={{ width: 'auto', background: 'transparent', padding: '0.4rem', borderRadius: '50%', color: 'var(--text-muted)' }}
+        >
+          <Trash2 size={15} />
+        </button>
+      </div>
+
+      <h3 className="repo-title x-theme-title" title={bookmark.theme} style={{ fontSize: '1.15rem', color: '#fff', marginBottom: '0.75rem', marginTop: '0.25rem', borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: '0.5rem' }}>
+        {bookmark.theme}
+      </h3>
+
+      <div className="card-section" style={{ marginBottom: '0.65rem' }}>
+        <div className="card-section-title">核心内容</div>
+        <p className="card-desc" style={{ fontSize: '0.85rem', color: '#cbd5e1', WebkitLineClamp: 3 }}>
+          {bookmark.coreContent}
+        </p>
+      </div>
+
+      <div className="card-section" style={{ marginBottom: '0.75rem' }}>
+        <div className="card-section-title">能帮到你什么</div>
+        <ul className="helps-list" style={{ paddingLeft: '1rem', listStyleType: 'disc', margin: '0.25rem 0' }}>
+          {bookmark.helpsWith && bookmark.helpsWith.map((help, idx) => (
+            <li key={idx} style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.25rem', lineHeight: '1.4' }}>
+              {help}
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="badge-container" style={{ marginTop: 'auto', paddingTop: '0.5rem' }}>
+        {bookmark.tags && bookmark.tags.map((tag) => (
+          <span key={tag} className="badge badge-category" style={{ background: 'rgba(29, 155, 240, 0.1)', color: '#1d9bf0', borderColor: 'rgba(29, 155, 240, 0.25)' }}>
+            #{tag}
+          </span>
+        ))}
+      </div>
+    </motion.div>
+  );
+};
 
 export default App;

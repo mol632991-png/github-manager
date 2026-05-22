@@ -2,172 +2,787 @@ import axios from 'axios';
 
 const BASE_URL = 'https://api.github.com';
 
-export const parseProfileUrl = (url) => {
-  if (!url) return null;
-  // Handle https://github.com/username
-  const match = url.match(/github\.com\/([^/?#]+)/);
-  return match ? match[1] : url;
+/* ------------------------------------------------------------------ */
+/*  URL 解析                                                           */
+/* ------------------------------------------------------------------ */
+
+export const parseProfileUrl = (input) => {
+  if (!input) return null;
+  const trimmed = String(input).trim();
+  // 支持 https://github.com/username / github.com/username / @username / username
+  const match = trimmed.match(/github\.com\/([^/?#\s]+)/i);
+  if (match) return match[1];
+  return trimmed.replace(/^@/, '').replace(/\/+$/, '');
 };
 
-export const fetchAllData = async (username, token, lastSyncTime = null) => {
-  const headers = token ? { Authorization: `token ${token}` } : {};
-  
-  const fetchPaginated = async (url, since = null) => {
-    let allData = [];
-    let page = 1;
-    const separator = url.includes('?') ? '&' : '?';
-    const sinceParam = since ? `${separator}since=${since}` : '';
-    
-    while (true) {
-      const res = await axios.get(`${url}${sinceParam}${sinceParam ? '&' : separator}page=${page}&per_page=100`, { headers });
-      if (res.data.length === 0) break;
-      allData = [...allData, ...res.data];
-      if (res.data.length < 100) break;
-      page++;
-    }
-    return allData;
-  };
+/* ------------------------------------------------------------------ */
+/*  HTTP 工具                                                          */
+/* ------------------------------------------------------------------ */
 
-  try {
-    // Fetch Repos (Support incremental via 'since')
-    const repos = await fetchPaginated(`${BASE_URL}/users/${username}/repos?sort=updated`, lastSyncTime);
-
-    // Fetch Starred (API doesn't support 'since', fetch all but we'll filter locally)
-    const starred = await fetchPaginated(`${BASE_URL}/users/${username}/starred`);
-
-    // Combine
-    const combined = [
-      ...repos.map(r => ({ ...r, isOwner: true })),
-      ...starred.map(s => ({ ...s, isOwner: false }))
-    ];
-
-    // Basic analysis for each
-    const analyzed = await Promise.all(combined.map(async project => {
-      const details = await analyzeProject(project, headers);
-      
-      return {
-        id: project.id,
-        name: project.name,
-        fullName: project.full_name,
-        owner: project.owner.login,
-        description: project.description || 'No description provided.',
-        url: project.html_url,
-        isOwner: project.isOwner,
-        language: project.language,
-        stars: project.stargazers_count,
-        topics: project.topics || [],
-        updatedAt: project.updated_at,
-        pushedAt: project.pushed_at,
-        category: detectCategory(project),
-        ...details
-      };
-    }));
-
-    return analyzed;
-  } catch (error) {
-    console.error('Error fetching GitHub data:', error);
-    throw error;
+const cleanToken = (t) => {
+  if (!t) return '';
+  const trimmed = String(t).trim();
+  if (trimmed === 'undefined' || trimmed === 'null' || trimmed === '') {
+    return '';
   }
+  return trimmed;
 };
 
-export const fetchRecentActivity = async (username, token, projects) => {
-  const headers = token ? { Authorization: `token ${token}` } : {};
+const buildHeaders = (token, accept = 'application/vnd.github+json') => {
+  const h = { Accept: accept };
+  const cleaned = cleanToken(token);
+  if (cleaned) h.Authorization = `token ${cleaned}`;
+  return h;
+};
+
+// 带翻页的增量拉取：按更新时间倒序取，遇到 <= sinceISO 的条目停止
+const fetchReposIncremental = async (username, token, sinceISO, isTokenOwner = false) => {
+  const headers = buildHeaders(token);
+  const all = [];
+  let page = 1;
+  const perPage = 100;
+  while (true) {
+    const url = isTokenOwner
+      ? `${BASE_URL}/user/repos?visibility=all&affiliation=owner&sort=updated&direction=desc&per_page=${perPage}&page=${page}`
+      : `${BASE_URL}/users/${username}/repos?sort=updated&direction=desc&per_page=${perPage}&page=${page}`;
+    const res = await axios.get(url, { headers });
+    if (!res.data || res.data.length === 0) break;
+
+    let reachedCutoff = false;
+    for (const item of res.data) {
+      if (sinceISO && new Date(item.updated_at) <= new Date(sinceISO)) {
+        reachedCutoff = true;
+        break;
+      }
+      all.push(item);
+    }
+    if (reachedCutoff) break;
+    if (res.data.length < perPage) break;
+    page += 1;
+    if (page > 20) break; // 安全上限
+  }
+  return all;
+};
+
+// 星标项目按加星时间倒序，需要 star+json accept 才能拿到 starred_at
+const fetchStarredIncremental = async (username, token, sinceISO) => {
+  const headers = buildHeaders(token, 'application/vnd.github.star+json');
+  const all = [];
+  let page = 1;
+  const perPage = 100;
+  while (true) {
+    const url = `${BASE_URL}/users/${username}/starred?sort=created&direction=desc&per_page=${perPage}&page=${page}`;
+    const res = await axios.get(url, { headers });
+    if (!res.data || res.data.length === 0) break;
+
+    let reachedCutoff = false;
+    for (const entry of res.data) {
+      // 带 star+json accept 时形如 { starred_at, repo: {...} }；否则直接是 repo
+      const repo = entry.repo ? entry.repo : entry;
+      const starredAt = entry.starred_at || repo.updated_at;
+      if (sinceISO && new Date(starredAt) <= new Date(sinceISO)) {
+        reachedCutoff = true;
+        break;
+      }
+      repo.__starred_at = starredAt;
+      all.push(repo);
+    }
+    if (reachedCutoff) break;
+    if (res.data.length < perPage) break;
+    page += 1;
+    if (page > 20) break;
+  }
+  return all;
+};
+
+/* ------------------------------------------------------------------ */
+/*  公开 API                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 拉取 repo + starred，合并、规范化、分类、生成中文说明。
+ * @param sinceISO 上次同步时间（可选）。传入后仅返回之后变更的项目。
+ */
+export const fetchAllData = async (username, token, sinceISO = null) => {
+  const useToken = cleanToken(token);
+  let isTokenOwner = false;
+  let activeToken = useToken;
+  let tokenError = false;
+
+  if (useToken) {
+    try {
+      const headers = { Accept: 'application/vnd.github+json', Authorization: `token ${useToken}` };
+      const userRes = await axios.get(`${BASE_URL}/user`, { headers });
+      if (userRes.data && userRes.data.login.toLowerCase() === username.toLowerCase()) {
+        isTokenOwner = true;
+      }
+    } catch (e) {
+      console.warn("Token 校验失败，将退回无 Token 的公共 API:", e.message);
+      activeToken = '';
+      tokenError = true;
+    }
+  }
+
+  const [repos, starred] = await Promise.all([
+    fetchReposIncremental(username, activeToken, sinceISO, isTokenOwner),
+    fetchStarredIncremental(username, activeToken, sinceISO),
+  ]);
+
+  const map = new Map();
+
+  repos.forEach((r) => {
+    map.set(r.id, { ...r, __isOwner: true, __isStarred: false });
+  });
+
+  starred.forEach((s) => {
+    if (map.has(s.id)) {
+      const existing = map.get(s.id);
+      existing.__isStarred = true;
+    } else {
+      map.set(s.id, { ...s, __isOwner: false, __isStarred: true });
+    }
+  });
+
+  const combined = Array.from(map.values());
+  const projects = combined.map(normalizeProject);
+  if (tokenError) {
+    projects.tokenError = true;
+  }
+  return projects;
+};
+
+/**
+ * 拉取近期动态（releases / 最新 commit），用于时间线。
+ * 仅针对最近推送的前 N 个项目，避免触发 API 限流。
+ */
+export const fetchRecentActivity = async (username, token, projects, sinceISO = null) => {
+  const headers = buildHeaders(token);
   const activities = [];
+  // 限制监控的项目数以防止 GitHub API 限流
+  // 无 Token 时仅监控最近更新的 3 个项目；有 Token 时监控前 15 个项目
+  const limit = token ? 15 : 3;
+  const monitor = [...projects]
+    .sort((a, b) => new Date(b.pushedAt || b.updatedAt) - new Date(a.pushedAt || a.updatedAt))
+    .slice(0, limit);
 
-  // Monitor top 30 most recently pushed projects
-  const monitorList = [...projects]
-    .sort((a, b) => new Date(b.pushedAt) - new Date(a.pushedAt))
-    .slice(0, 30);
-
-  for (const project of monitorList) {
+  for (const project of monitor) {
+    // 1) release
     try {
-      // 1. Try Release
-      const releaseRes = await axios.get(`${BASE_URL}/repos/${project.fullName}/releases/latest`, { headers });
-      if (releaseRes.data) {
-        activities.push({
-          id: `release-${releaseRes.data.id}`,
-          repoName: project.name, // RAW NAME
-          type: 'release',
-          title: `发布了新版本: ${releaseRes.data.tag_name}`,
-          content: releaseRes.data.body?.slice(0, 400) || '该版本包含功能更新与性能优化。',
-          date: releaseRes.data.published_at,
-          url: releaseRes.data.html_url
-        });
-        continue;
+      const r = await axios.get(`${BASE_URL}/repos/${project.fullName}/releases?per_page=1`, { headers });
+      if (r.data && r.data[0]) {
+        const rel = r.data[0];
+        if (!sinceISO || new Date(rel.published_at) > new Date(sinceISO)) {
+          activities.push({
+            id: `release-${rel.id}`,
+            projectId: project.id,
+            repoName: project.name,
+            author: project.owner,
+            isOwner: project.isOwner,
+            type: 'release',
+            title: `发布新版本 ${rel.tag_name}`,
+            content: summarizeText(rel.body, 320) || '发布了新版本，包含功能更新或修复。',
+            date: rel.published_at,
+            url: rel.html_url,
+          });
+          continue; // 有发布则跳过 commit
+        }
       }
-    } catch (e) {}
+    } catch { /* 忽略单项错误 */ }
 
+    // 2) 最新 commit
     try {
-      // 2. Try Recent Commit
-      const commitRes = await axios.get(`${BASE_URL}/repos/${project.fullName}/commits?per_page=1`, { headers });
-      if (commitRes.data && commitRes.data[0]) {
-        const commit = commitRes.data[0];
-        activities.push({
-          id: `commit-${commit.sha}`,
-          repoName: project.name, // RAW NAME
-          type: 'commit',
-          title: '代码持续维护中',
-          content: commit.commit.message || '开发者提交了新的代码改进。',
-          date: commit.commit.author.date,
-          url: commit.html_url
-        });
+      const c = await axios.get(`${BASE_URL}/repos/${project.fullName}/commits?per_page=1`, { headers });
+      if (c.data && c.data[0]) {
+        const commit = c.data[0];
+        const commitDate = commit.commit?.author?.date || commit.commit?.committer?.date;
+        if (!sinceISO || (commitDate && new Date(commitDate) > new Date(sinceISO))) {
+          activities.push({
+            id: `commit-${commit.sha}`,
+            projectId: project.id,
+            repoName: project.name,
+            author: project.owner,
+            isOwner: project.isOwner,
+            type: 'commit',
+            title: '代码有新提交',
+            content: summarizeText(commit.commit?.message, 220) || '作者提交了新的改动。',
+            date: commitDate,
+            url: commit.html_url,
+          });
+        }
       }
-    } catch (err) {}
+    } catch { /* 忽略 */ }
   }
 
   return activities.sort((a, b) => new Date(b.date) - new Date(a.date));
 };
 
-const detectCategory = (project) => {
-  const topics = (project.topics || []).map(t => t.toLowerCase());
-  const name = project.name.toLowerCase();
-  const desc = (project.description || '').toLowerCase();
-  
-  // 场景 1: 智能体技能 (MCP/Cursor/Windsurf)
-  if (topics.includes('mcp') || name.includes('mcp') || name.includes('skill') || desc.includes('cursor') || desc.includes('windsurf')) return '智能体技能 (MCP)';
-  
-  // 场景 2: 独立软件/系统 (需要部署或安装)
-  if (topics.includes('desktop') || name.includes('desktop') || desc.includes('app') || topics.includes('dashboard')) return '独立运行软件';
-  
-  // 场景 3: 开发集成工具 (SDK/API/库)
-  if (topics.includes('sdk') || topics.includes('api') || topics.includes('library') || name.includes('client')) return '开发集成工具';
-  
-  // 场景 4: 知识库与资源 (列表/教程)
-  if (topics.includes('awesome') || name.includes('list') || topics.includes('tutorial')) return '知识库与资源';
-  
-  return '其他实用项目';
+/**
+ * 按需获取 README，用于详情页二次丰富（避免全量时触发限流）。
+ * 返回纯文本片段。
+ */
+export const fetchReadmeSnippet = async (fullName, token) => {
+  const headers = buildHeaders(token, 'application/vnd.github.raw');
+  try {
+    const res = await axios.get(`${BASE_URL}/repos/${fullName}/readme`, { headers });
+    // 当使用 raw accept 时，res.data 就是纯文本
+    const text = typeof res.data === 'string' ? res.data : '';
+    return text.slice(0, 4000);
+  } catch {
+    return '';
+  }
 };
 
-const analyzeProject = async (project, headers) => {
-  // 1. Problem Solved: Clear and human-readable
-  let problemSolved = project.description || '该项目主要提供技术实现方案，建议结合其核心功能在对应场景中使用。';
-  
-  // 2. Usage Guide: Based on Scenario
-  let usage = '请下载代码并查阅目录下的 README.md 了解详情。';
-  const name = project.name.toLowerCase();
-  const desc = (project.description || '').toLowerCase();
-  const category = detectCategory(project);
+/* ------------------------------------------------------------------ */
+/*  规范化 + 分类 + 中文说明                                            */
+/* ------------------------------------------------------------------ */
 
-  if (category === '智能体技能 (MCP)') {
-    usage = '【场景: 智能体插件】下载解压后，在 Cursor、Windsurf 或 Claude Desktop 的设置中添加该文件夹路径。';
-  } else if (category === '独立运行软件') {
-    if (project.language === 'JavaScript' || project.language === 'TypeScript') {
-      usage = '【场景: 本地部署】需要 Node.js。下载后执行 `npm install`，再运行 `npm run dev`。';
-    } else if (project.language === 'Python') {
-      usage = '【场景: 本地部署】需要 Python。执行 `pip install -r requirements.txt` 后运行主程序。';
-    } else {
-      usage = '【场景: 下载运行】这是一个独立软件，请下载后根据说明文档进行安装或运行。';
-    }
-  } else if (category === '开发集成工具') {
-    usage = '【场景: 开发集成】这是一个库或接口。您可以在项目中通过 npm/pip 安装，或参考代码实现。';
-  } else if (category === '知识库与资源') {
-    usage = '【场景: 查阅资料】这是资源清单。直接在浏览器中打开 GitHub 页面查看即可。';
+function normalizeProject(raw) {
+  const category = detectCategory(raw);
+  const scenario = detectScenario(raw);
+  const { problemSolved, usage, helpsWith } = generateGuide(raw, category, scenario);
+  return {
+    id: raw.id,
+    name: raw.name,
+    fullName: raw.full_name,
+    owner: raw.owner?.login || '未知作者',
+    ownerAvatar: raw.owner?.avatar_url || '',
+    description: raw.description || '',
+    url: raw.html_url,
+    isOwner: !!raw.__isOwner,
+    isStarred: !!raw.__isStarred,
+    starredAt: raw.__starred_at || null,
+    language: raw.language || '其他',
+    stars: raw.stargazers_count || 0,
+    forks: raw.forks_count || 0,
+    topics: raw.topics || [],
+    updatedAt: raw.updated_at,
+    pushedAt: raw.pushed_at,
+    createdAt: raw.created_at,
+    archived: !!raw.archived,
+    fork: !!raw.fork,
+    license: raw.license?.spdx_id || raw.license?.name || '',
+    homepage: raw.homepage || '',
+    category,
+    scenario,
+    problemSolved,
+    usage,
+    helpsWith,
+  };
+}
+
+export { normalizeProject };
+
+/* --------------------------- 分类 ----------------------------- */
+
+/**
+ * 分类与中文化规则说明 (详情见 docs/CLASSIFICATION_RULES.md)
+ * 1. 技术用途 (Category): 10大类，由 detectCategory 依次匹配关键字与主题进行判定。
+ * 2. 使用场景 (Scenario): 15大类，由 detectScenario 通过 SCENARIO_RULES 匹配规则进行判定。
+ * 3. 结构化信息: 由 generateGuide 生成：
+ *    - 项目核心定位 (problemSolved): 提取原生描述或基于分类和场景兜底拼装。
+ *    - 项目使用方式 (usage): 基于技术用途与开发语言组装针对性的上手步骤。
+ *    - 项目价值 (helpsWith): 生成 2-4 条具体研发提效与开源协议价值。
+ */
+
+// 分类标签用通俗中文，便于用户理解
+export const CATEGORY_LIST = [
+  'AI 与大模型',
+  'Web 应用与站点',
+  '移动与桌面应用',
+  '命令行与工具软件',
+  '开发框架与 SDK',
+  '数据与后端服务',
+  'DevOps 与运维',
+  '学习资源与清单',
+  '游戏与创意',
+  '其他实用项目',
+];
+
+export function detectCategory(raw) {
+  const topics = (raw.topics || []).map((t) => String(t).toLowerCase());
+  const name = (raw.name || '').toLowerCase();
+  const desc = (raw.description || '').toLowerCase();
+  const lang = (raw.language || '').toLowerCase();
+  const blob = `${name} ${desc} ${topics.join(' ')}`;
+
+  const has = (arr) => arr.some((k) => blob.includes(k));
+  // 对短单词/易误匹配的关键词使用词边界
+  const hasWord = (arr) => arr.some((k) => {
+    const re = new RegExp(`(?:^|[^a-z0-9])${k}(?:[^a-z0-9]|$)`, 'i');
+    return re.test(blob);
+  });
+
+  // 顺序很重要：先判定更具体的
+  if (has(['awesome-', 'awesome_', 'cheatsheet', 'tutorial', 'roadmap', 'book', 'course', 'interview', '教程', '学习', '面试'])
+      || topics.includes('awesome') || topics.includes('tutorial') || topics.includes('learning')
+      || name.startsWith('awesome-') || name === 'awesome') {
+    return '学习资源与清单';
   }
 
-  return { 
-    usage, 
-    problemSolved, 
-    techStack: [], 
-    language: (project.language || 'OTHER').toUpperCase() 
+  if (has(['llm', 'gpt', 'chatgpt', 'openai', 'claude', 'agent', 'rag', 'langchain', 'prompt', 'stable-diffusion',
+           'diffusion', 'transformer', 'embedding', 'tts', 'asr', 'machine-learning', 'deep-learning',
+           'neural', '大模型', '智能体'])
+      || hasWord(['ai', 'mcp', 'ml'])
+      || topics.some((t) => ['ai', 'llm', 'gpt', 'chatgpt', 'openai', 'agent', 'rag', 'mcp',
+                             'machine-learning', 'deep-learning', 'pytorch', 'tensorflow'].includes(t))) {
+    return 'AI 与大模型';
+  }
+
+  if (has(['k8s', 'kubernetes', 'docker', 'terraform', 'ansible', 'ci/cd', 'ci-cd', 'monitoring', 'prometheus',
+           'grafana', 'devops', 'infrastructure', 'helm', '部署', '运维'])
+      || topics.some((t) => ['kubernetes', 'docker', 'terraform', 'devops', 'ci', 'cd', 'infrastructure'].includes(t))) {
+    return 'DevOps 与运维';
+  }
+
+  if (hasWord(['cli', 'command-line', 'terminal', 'shell-script'])
+      || topics.includes('cli') || name.startsWith('cli-') || name.endsWith('-cli') || name === 'cli') {
+    return '命令行与工具软件';
+  }
+
+  if (has(['ios', 'android', 'flutter', 'react-native', 'electron', 'tauri', 'desktop', 'mobile', 'app '])
+      || topics.some((t) => ['ios', 'android', 'flutter', 'react-native', 'electron', 'tauri', 'desktop', 'mobile'].includes(t))
+      || ['swift', 'kotlin', 'objective-c', 'dart'].includes(lang)) {
+    return '移动与桌面应用';
+  }
+
+  if (has(['database', 'sql', 'nosql', 'postgres', 'mysql', 'mongo', 'redis', 'etl', 'graphql', 'rest-api',
+           'backend', 'microservice', '后端', '数据库'])
+      || topics.some((t) => ['database', 'backend', 'api', 'graphql', 'rest', 'postgres', 'mysql', 'mongodb', 'redis'].includes(t))) {
+    return '数据与后端服务';
+  }
+
+  if (has(['sdk', 'library', 'framework', 'component', 'hooks', 'package', 'plugin', 'middleware', 'boilerplate', 'starter'])
+      || topics.some((t) => ['sdk', 'library', 'framework', 'plugin', 'middleware', 'boilerplate'].includes(t))) {
+    return '开发框架与 SDK';
+  }
+
+  if (has(['web', 'website', 'dashboard', 'portfolio', 'blog', 'landing', 'ssr', 'static-site', 'nextjs', 'nuxt'])
+      || topics.some((t) => ['web', 'website', 'react', 'vue', 'nextjs', 'nuxt', 'frontend', 'dashboard'].includes(t))
+      || ['javascript', 'typescript', 'vue', 'html'].includes(lang)) {
+    return 'Web 应用与站点';
+  }
+
+  if (has(['game', 'pixel', 'unity', 'godot', 'pygame', '游戏'])
+      || topics.some((t) => ['game', 'unity', 'godot', 'unreal', 'pygame'].includes(t))) {
+    return '游戏与创意';
+  }
+
+  return '其他实用项目';
+}
+
+/* --------------------------- 使用场景分类 ----------------------------- */
+
+// 第二维度：按「项目给你解决了什么场景的问题」来归纳，便于从生活/工作视角查找。
+// 注：一个项目的 category（技术用途）和 scenario（使用场景）是正交的。
+// 例如 LangChain：category = AI 与大模型，scenario = 大模型开发。
+export const SCENARIO_LIST = [
+  '金融投资',
+  'AI 技能与插件',
+  '大模型开发',
+  '游戏娱乐',
+  '音乐与音频',
+  '图像与视频',
+  '写作与小说',
+  '办公与效率',
+  '学习与教育',
+  '数据分析',
+  '安全与隐私',
+  '网络与爬虫',
+  '生活工具',
+  '开发者辅助',
+  '其他场景',
+];
+
+// 场景关键词表：key = 场景名，value = 小写关键词集合（name/desc/topic 全量匹配）
+// 每条规则都尽量具体，先命中的规则即返回。
+const SCENARIO_RULES = [
+  ['金融投资', {
+    topics: ['finance', 'fintech', 'trading', 'quant', 'stock', 'crypto', 'blockchain', 'bitcoin', 'ethereum', 'defi'],
+    keywords: ['quant', 'trading', 'finance', 'fintech', 'stock', 'stocks', 'crypto', 'bitcoin', 'ethereum',
+               'blockchain', 'defi', 'wallet', 'exchange', 'backtest',
+               '量化', '交易', '股票', '基金', '金融', '区块链', '加密货币', '钱包', '理财'],
+  }],
+  ['AI 技能与插件', {
+    topics: ['mcp', 'copilot', 'cursor-rules', 'cursor', 'windsurf', 'claude-desktop', 'chatgpt-plugin', 'raycast', 'obsidian-plugin'],
+    keywords: ['mcp-server', 'mcp_server', 'mcp server', 'skill', 'skills', 'cursor rules', 'cursorrules',
+               'copilot', 'chatgpt plugin', 'claude skill', 'raycast extension', 'obsidian plugin',
+               '智能体技能', '插件', '技能包'],
+  }],
+  ['大模型开发', {
+    topics: ['llm', 'gpt', 'openai', 'anthropic', 'claude', 'langchain', 'llamaindex', 'rag', 'agent',
+             'embedding', 'vector-database', 'pytorch', 'tensorflow', 'transformers', 'fine-tuning'],
+    keywords: ['llm', 'langchain', 'llamaindex', 'rag ', 'retrieval', 'embedding', 'fine-tune',
+               'fine tuning', 'transformer', 'stable diffusion', 'diffusion model',
+               'train model', 'pre-trained', 'foundation model',
+               '大模型', '微调', '预训练', '模型训练', '向量数据库'],
+  }],
+  ['游戏娱乐', {
+    topics: ['game', 'games', 'gamedev', 'unity', 'godot', 'unreal', 'pygame', 'minecraft', 'roguelike', 'emulator'],
+    keywords: ['game engine', 'game-engine', 'roguelike', 'emulator', 'minecraft', 'pixel art',
+               '游戏', '模拟器', '像素'],
+  }],
+  ['音乐与音频', {
+    topics: ['music', 'audio', 'tts', 'speech', 'voice', 'midi', 'daw', 'podcast', 'spotify', 'netease'],
+    keywords: ['music', 'audio ', 'tts', 'speech synthesis', 'voice clone', 'midi', 'daw', 'podcast',
+               'sound effect', 'waveform',
+               '音乐', '音频', '语音', '配音', '歌曲', '播客'],
+  }],
+  ['图像与视频', {
+    topics: ['image', 'video', 'computer-vision', 'image-processing', 'video-editing', 'photo', 'stable-diffusion',
+             'comfyui', 'ocr'],
+    keywords: ['image processing', 'video editing', 'photo', 'photograph', 'comfyui',
+               'stable diffusion', 'computer vision', 'object detection', 'face recognition', 'ocr',
+               '图像', '视频', '视觉', '抠图', '剪辑', '识别'],
+  }],
+  ['写作与小说', {
+    topics: ['writing', 'novel', 'blog', 'markdown', 'cms', 'publishing', 'ebook', 'notetaking'],
+    keywords: ['novel', 'writing', 'blog engine', 'cms ', 'static site generator', 'markdown editor',
+               'note taking', 'note-taking', 'obsidian',
+               '小说', '写作', '笔记', '博客', '公众号', '文章'],
+  }],
+  ['办公与效率', {
+    topics: ['productivity', 'office', 'document', 'pdf', 'excel', 'word', 'spreadsheet', 'workflow', 'automation'],
+    keywords: ['productivity', 'pdf ', 'excel ', 'spreadsheet', 'word document', 'workflow',
+               'task manager', 'todo', 'calendar', 'meeting',
+               '办公', '效率', '表格', '日程', '会议', '文档', '待办'],
+  }],
+  ['学习与教育', {
+    topics: ['education', 'learning', 'tutorial', 'course', 'roadmap', 'interview', 'algorithm', 'leetcode',
+             'cheatsheet', 'awesome'],
+    keywords: ['tutorial', 'course', 'roadmap', 'interview', 'cheatsheet', 'learn ', 'learning resources',
+               'awesome ', 'curriculum', 'textbook', 'algorithm',
+               '教程', '学习', '面试', '课程', '算法题', '题解', '学习路线'],
+  }],
+  ['数据分析', {
+    topics: ['data-science', 'data-analysis', 'data-visualization', 'pandas', 'numpy', 'jupyter', 'bi',
+             'analytics', 'dashboard', 'etl'],
+    keywords: ['data science', 'data analysis', 'data visualization', 'pandas', 'jupyter',
+               'business intelligence', ' bi ', 'analytics', 'etl ', 'dashboard',
+               '数据分析', '可视化', '报表', '指标', '统计'],
+  }],
+  ['安全与隐私', {
+    topics: ['security', 'privacy', 'pentest', 'hacking', 'cryptography', 'firewall', 'vpn', 'proxy'],
+    keywords: ['security', 'privacy', 'pentest', 'penetration', 'hacking', 'exploit',
+               'cryptography', 'firewall', 'vpn ', 'zero-trust',
+               '安全', '隐私', '渗透', '加密', '防火墙'],
+  }],
+  ['网络与爬虫', {
+    topics: ['crawler', 'scraper', 'spider', 'scraping', 'proxy', 'http', 'network'],
+    keywords: ['web scraper', 'web-scraper', 'crawler', 'scraping', 'spider', 'http client',
+               'proxy server', 'network tool',
+               '爬虫', '抓取', '采集', '代理'],
+  }],
+  ['生活工具', {
+    topics: ['life', 'home-automation', 'smart-home', 'recipe', 'fitness', 'health', 'translator', 'weather'],
+    keywords: ['home automation', 'smart home', 'recipe', 'fitness', 'health', 'translator', 'weather',
+               'habit tracker',
+               '生活', '智能家居', '菜谱', '健身', '健康', '翻译', '天气', '习惯'],
+  }],
+  ['开发者辅助', {
+    topics: ['developer-tools', 'devtools', 'code-review', 'git', 'linter', 'formatter', 'ide', 'vscode',
+             'editor', 'debugger'],
+    keywords: ['developer tool', 'dev tool', 'code review', 'git helper', 'linter', 'formatter',
+               'ide ', 'vs code extension', 'vscode extension', 'debugger',
+               '开发工具', '调试', '代码格式化', '编辑器插件'],
+  }],
+];
+
+export function detectScenario(raw) {
+  const topics = (raw.topics || []).map((t) => String(t).toLowerCase());
+  const name = (raw.name || '').toLowerCase();
+  const desc = (raw.description || '').toLowerCase();
+  const blob = ` ${name} ${desc} ${topics.join(' ')} `;
+
+  for (const [scenario, rule] of SCENARIO_RULES) {
+    const topicHit = rule.topics && rule.topics.some((t) => topics.includes(t));
+    const kwHit = rule.keywords && rule.keywords.some((k) => blob.includes(k.toLowerCase()));
+    if (topicHit || kwHit) return scenario;
+  }
+  return '其他场景';
+}
+
+/* --------------------------- 中文说明 ----------------------------- */
+
+/**
+ * 将英文或混合描述转换为纯中文核心功能描述
+ * 核心策略：用项目名称 + 所属领域 + 场景合成自然中文句子，
+ * 并在末尾附上原始英文描述供参考
+ */
+function buildChineseCoreFunc(desc, name, lang, category, scenario) {
+  // 中文域名描述模版
+  const categoryDescMap = {
+    'AI 与大模型': '一款人工智能与大语言模型相关工具',
+    'Web 应用与站点': '一款网页应用或可视化站点',
+    '移动与桌面应用': '一款移动端或桌面端本地应用',
+    '命令行与工具软件': '一款命令行终端工具',
+    '开发框架与 SDK': '一个开发框架或软件开发工具包',
+    '数据与后端服务': '一款数据处理或后端服务程序',
+    'DevOps 与运维': '一款部署运维自动化工具',
+    '学习资源与清单': '一份学习资源清单或技术参考合集',
+    '游戏与创意': '一款游戏或创意互动项目',
+    '其他实用项目': '一个实用性开源工具项目',
   };
-};
+
+  const categoryDesc = categoryDescMap[category] || '一个开源软件项目';
+  const scenarioPart = (scenario && scenario !== '其他场景') ? `，专注于「${scenario}」场景` : '';
+  const langPart = lang ? `，使用 ${lang} 语言开发` : '';
+
+  // 构建中文核心功能描述
+  let cnDesc = `${name} 是${categoryDesc}${scenarioPart}${langPart}。`;
+
+  // 如果有原始英文描述，附在末尾作为补充参考
+  if (desc) {
+    // 过滤掉纯 URL 和特殊标记符的行
+    const cleanDesc = desc.replace(/https?:\/\/\S+/g, '').replace(/--.*$/, '').trim();
+    if (cleanDesc.length > 2) {
+      cnDesc += `（开发者原文介绍：${cleanDesc}）`;
+    }
+  }
+
+  return cnDesc;
+}
+
+function generateGuide(raw, category, scenario) {
+  const desc = (raw.description || '').trim();
+  const name = raw.name || '';
+  const lang = raw.language || '';
+  const topics = raw.topics || [];
+  const license = raw.license?.spdx_id || raw.license?.name || '';
+  const archived = !!raw.archived;
+
+  // --- 一、项目核心定位 (始终为纯中文) ---
+  const coreFunc = buildChineseCoreFunc(desc, name, lang, category, scenario);
+
+  // 应用场景 / 能力
+  let appScenario = '';
+  switch (category) {
+    case 'AI 与大模型':
+      appScenario = '主要用于人工智能应用构建、自动化推理或智能体调度，解决大模型复杂逻辑和流程对接问题。';
+      break;
+    case 'Web 应用与站点':
+      appScenario = '主要用于网页前端展示、信息发布或管理控制台界面构建，解决网页交互与多端自适应展示问题。';
+      break;
+    case '移动与桌面应用':
+      appScenario = '主要用于本地客户端应用运行，解决移动端或桌面端无网离线工作与交互体验问题。';
+      break;
+    case '命令行与工具软件':
+      appScenario = '主要用于终端下的快速任务执行与工具调用，解决日常重复性手工操作、实现流程自动化。';
+      break;
+    case '开发框架与 SDK':
+      appScenario = '主要作为第三方依赖库引入，提供通用的接口封装与核心逻辑，避免重复造轮子。';
+      break;
+    case '数据与后端服务':
+      appScenario = '主要作为后端服务或数据库工具运行，解决数据存储、接口高并发及持久化逻辑处理问题。';
+      break;
+    case 'DevOps 与运维':
+      appScenario = '主要用于服务器集群管理、监控告警或自动化部署流水线构建，降低运维复杂度。';
+      break;
+    case '学习资源与清单':
+      appScenario = '主要用于系统学习、技术路线规划和优秀开源项目发现，解决开发者信息零散的问题。';
+      break;
+    case '游戏与创意':
+      appScenario = '主要用于创意互动体验、休闲娱乐或游戏引擎开发学习，探索多媒体与交互艺术。';
+      break;
+    default:
+      appScenario = '用于特定开发或业务环节，解决重复性工程编码问题，提高模块复用能力。';
+  }
+  if (scenario && scenario !== '其他场景') {
+    appScenario += ` 并广泛适用于「${scenario}」相关的具体业务场景。`;
+  }
+
+  // --- 二、项目使用方式 ---
+  const steps = buildUsageGuide(category, lang, raw);
+  
+  let coreUsage = '本地部署启动、自托管运行，或作为模块集成到现有开发环境中。';
+  if (category === '学习资源与清单') {
+    coreUsage = '本地克隆作为参考文档，或直接在 GitHub 页面翻阅和学习。';
+  } else if (category === '开发框架与 SDK') {
+    coreUsage = '在本地项目中引入该依赖库，用于开发和二次封装。';
+  } else if (category === 'AI 与大模型') {
+    coreUsage = '本地自托管运行或集成到人工智能客户端作为核心推理后端。';
+  } else if (category === '命令行与工具软件') {
+    coreUsage = '通过终端命令行直接调用执行，处理特定数据或自动化流程。';
+  }
+
+  let extraUsage = '通过容器化（Docker）打包部署到生产集群，或配合自动化触发器实现无人值守运维流程。';
+  if (category === '学习资源与清单') {
+    extraUsage = '作为团队内部的技术规范和参考手册，或结合翻译工具构建中文知识库。';
+  } else if (category === '开发框架与 SDK') {
+    extraUsage = '为框架编写自定义插件扩展，或向官方提交代码贡献核心功能模块。';
+  } else if (category === 'AI 与大模型') {
+    extraUsage = '接入多款不同的国内外大语言模型接口，或拓展为私有化的多智能体协同系统。';
+  }
+
+  const problemSolved = `一、项目核心定位
+• 核心功能：${coreFunc}
+• 适用场景：${appScenario}
+• 所属领域：${category} ／ ${scenario}
+
+二、项目使用方式
+• 启动步骤：${steps}
+• 主要用法：${coreUsage}
+• 进阶用法：${extraUsage}`;
+
+  // --- 三、项目独立性分析 ---
+  let independence = '是。项目具备完整的运行逻辑，可以在本地或服务器中独立运行。';
+  if (category === '学习资源与清单') {
+    independence = '是。作为一个资源合集，可以直接离线浏览阅读，无需配套运行服务。';
+  } else if (category === '开发框架与 SDK') {
+    independence = '部分场景可。主要作为组件/库依赖嵌入到宿主程序中，无法单独作为完整应用使用。';
+  } else if (category === 'AI 与大模型') {
+    independence = '部分场景可。核心逻辑可单机启动，但需要配置并联网访问大模型 API 密钥（或本地搭建的大模型实例）作为推理大脑。';
+  }
+
+  let dependenciesList = '';
+  const langLower = lang.toLowerCase();
+  if (langLower.includes('javascript') || langLower.includes('typescript') || langLower.includes('node')) {
+    dependenciesList = '  1. Node.js 运行环境 (v18+)\n  2. 包管理器 (npm / yarn / pnpm)';
+  } else if (langLower.includes('python')) {
+    dependenciesList = '  1. Python 3 环境 (v3.8+)\n  2. 第三方库依赖管理工具 (pip / poetry)';
+  } else if (langLower.includes('go')) {
+    dependenciesList = '  1. Go 语言编译器环境 (v1.18+)';
+  } else if (langLower.includes('rust')) {
+    dependenciesList = '  1. Rust 编译器与 Cargo 包管理器';
+  } else {
+    dependenciesList = '  1. 对应开发语言的运行/编译环境\n  2. 包依赖管理及构建工具';
+  }
+  if (category === 'AI 与大模型') {
+    dependenciesList += '\n  3. 大模型 API 访问凭证 (如 DeepSeek, OpenAI Key)';
+  } else if (category === 'DevOps 与运维') {
+    dependenciesList += '\n  3. Docker/Kubernetes 等容器运行时';
+  }
+
+  let envConfig = '常规 CPU 运行环境即可，若需要发布为公网服务则建议部署在云服务器中。';
+  if (category === '学习资源与清单') {
+    envConfig = '无特殊硬件要求，支持 Markdown 预览的编辑器或浏览器即可。';
+  } else if (category === 'AI 与大模型') {
+    envConfig = '本地运行需能够稳定访问大模型 API 端点；若进行本地大模型推理，需较好的 GPU/NPU 硬件支持。';
+  }
+
+  // --- 四、关键注意事项 ---
+  let preconditions = '确保本地环境已成功搭建，并且克隆仓库后能正确通过包管理器安装所有依赖。';
+  if (category === 'AI 与大模型') {
+    preconditions = '需要提前申请并配置大模型 API 密钥（ApiKey）并确保本地网络能顺畅连接大模型端点。';
+  }
+  if (archived) {
+    preconditions += ' 此外，项目已被作者归档（Archived），请注意该项目不再接受更新，建议作为参考和学习代码。';
+  }
+
+  let limits = '主要受限于当前的硬件网络条件，部分特定平台库可能仅在 Linux/macOS 下获得最佳兼容性。';
+  if (category === 'AI 与大模型') {
+    limits = '性能和响应速度受限于大模型上下文长度（Context Length）限制以及 API 的 QPS 请求速率与计费额度限制。';
+  } else if (category === '学习资源与清单') {
+    limits = '内容可能存在时效性，随着技术演进部分参考链接或项目配置可能会失效。';
+  }
+
+  const usage = `三、项目独立性分析
+• 独立运行能力：${independence}
+• 配套依赖清单：
+${dependenciesList}
+• 基础环境配置：${envConfig}
+
+四、关键注意事项
+• 核心前提：${preconditions}
+• 典型使用限制：${limits}`;
+
+  // 3) 能帮到你什么：根据场景 + 分类给出 2-4 条实际价值
+  const helpsWith = buildHelpsWith(category, scenario, raw);
+
+  return { problemSolved, usage, helpsWith };
+}
+
+function buildUsageGuide(category, language, raw) {
+  const lang = (language || '').toLowerCase();
+  const langTips = {
+    javascript: '需 Node.js 环境。克隆后执行 `npm install` 安装依赖，再用 `npm run dev` 或 `npm start` 启动。',
+    typescript: '需 Node.js 环境。克隆后执行 `npm install`，再按 README 执行对应的 `npm run` 命令。',
+    python: '需 Python 3。建议创建虚拟环境后执行 `pip install -r requirements.txt`，再运行主入口脚本。',
+    go: '需 Go 环境。执行 `go build` 或 `go run .`，可直接获得二进制程序。',
+    rust: '需 Rust 工具链。执行 `cargo build --release` 得到可执行文件，或 `cargo run` 直接运行。',
+    java: '需 JDK。使用 Maven `mvn package` 或 Gradle `./gradlew build` 构建 jar 包后运行。',
+    'c++': '使用仓库中的 CMake / Makefile 编译。通常流程：`cmake -B build && cmake --build build`。',
+    c: '按仓库中的 Makefile 编译：执行 `make` 后运行生成的可执行文件。',
+    ruby: '需 Ruby。执行 `bundle install` 安装 gem 依赖，再 `bundle exec` 运行。',
+    php: '将代码放入 Web 服务器目录，或使用 `composer install` 安装依赖后运行。',
+    shell: '赋予脚本可执行权限 `chmod +x`，再直接运行即可。',
+    dockerfile: '使用 `docker build -t <name> .` 构建镜像，再 `docker run` 启动容器。',
+  };
+
+  const byCategory = {
+    'AI 与大模型': '按 README 准备好模型权重 / API Key（如 OpenAI Key），安装依赖后运行示例脚本或启动服务，再通过 Web UI 或接口进行交互。',
+    'Web 应用与站点': '克隆仓库到本地，安装依赖后运行开发服务器；浏览器访问本地地址即可预览效果，部署可使用 Vercel / Netlify 等平台。',
+    '移动与桌面应用': '使用对应平台的 IDE（Xcode / Android Studio / VS Code）打开项目，按 README 配置签名或环境变量后构建安装包。',
+    '命令行与工具软件': '按 README 的 install 一节安装（通常是 `npm i -g`、`pipx install` 或下载 release 二进制），随后在终端直接调用命令。',
+    '开发框架与 SDK': '作为依赖引入你自己的项目中（`npm install` / `pip install` / `go get`），再按文档示例调用相关 API。',
+    '数据与后端服务': '按 README 准备数据库和环境变量，启动服务后通过 HTTP / gRPC 接口调用。建议先用提供的示例数据跑通。',
+    'DevOps 与运维': '按 README 的 Prerequisites 准备基础设施（集群 / 云账号），再执行提供的脚本或 manifest 进行部署。',
+    '学习资源与清单': '这是一份资源合集，直接在 GitHub 页面浏览目录，或克隆到本地作为离线参考资料即可。',
+    '游戏与创意': '按 README 安装运行时（如 Unity / Godot / Pygame），打开工程后运行即可进入游戏。',
+    '其他实用项目': '克隆仓库，阅读 README 获取具体运行方式。',
+  };
+
+  const langHint = langTips[lang];
+  const catHint = byCategory[category] || byCategory['其他实用项目'];
+  // 对私有/归档项目追加提示
+  const extra = raw.archived ? '（项目已归档，作者不再维护，建议作为参考。）' : '';
+  return [catHint, langHint].filter(Boolean).join(' ') + extra;
+}
+
+function buildHelpsWith(category, scenario, raw) {
+  const byCategory = {
+    'AI 与大模型': ['快速搭建属于自己的 AI 应用', '学习主流大模型 / 智能体的落地方式', '复用已有 prompt 与工作流'],
+    'Web 应用与站点': ['作为个人项目或作品集的起点', '学习现代前端架构', '直接部署供自己或他人使用'],
+    '移动与桌面应用': ['作为跨平台应用的实现参考', '快速得到可分发的安装包', '复用 UI 交互方案'],
+    '命令行与工具软件': ['自动化日常重复工作', '作为脚手架嵌入自己的流程', '提升终端操作效率'],
+    '开发框架与 SDK': ['在你自己的项目中少写大量代码', '提供稳定统一的接口抽象', '参考其架构设计'],
+    '数据与后端服务': ['提供可复用的后端能力', '作为微服务架构中的一环', '学习数据建模与接口设计'],
+    'DevOps 与运维': ['一键拉起复杂的基础设施', '规范化部署与运维流程', '提升系统可观测性与稳定性'],
+    '学习资源与清单': ['系统化学习某个领域', '快速找到高质量的相关项目', '作为知识地图长期翻阅'],
+    '游戏与创意': ['作为游戏制作学习样例', '直接游玩或二次创作', '参考玩法与代码设计'],
+    '其他实用项目': ['解决某个特定的小问题', '作为工程参考样例', '按需裁剪为自己的模块'],
+  };
+
+  // 场景维度的价值描述，与技术用途正交
+  const byScenario = {
+    '金融投资': '帮助你在量化交易、行情分析或加密钱包等金融场景中节省造轮子时间',
+    'AI 技能与插件': '可作为 Cursor / Claude / Raycast 等工具的能力扩展直接使用',
+    '大模型开发': '提供从数据、微调到推理的链路参考，适合在自己的 AI 项目中复用',
+    '游戏娱乐': '直接游玩或在此基础上改造出自己的玩法',
+    '音乐与音频': '处理音乐、音频、TTS 等场景下的常见问题',
+    '图像与视频': '完成抠图、滤镜、剪辑或视觉识别等日常图像/视频任务',
+    '写作与小说': '为写作、笔记、博客等创作场景提供工具链',
+    '办公与效率': '减少重复性办公操作，让日常工作流更顺畅',
+    '学习与教育': '作为系统学习某领域或准备面试的第一手资料',
+    '数据分析': '快速搭建数据清洗、分析、可视化流水线',
+    '安全与隐私': '协助你在本地保护隐私或排查安全风险',
+    '网络与爬虫': '适合在数据采集、代理转发等网络场景中复用',
+    '生活工具': '改善生活中的具体小问题，比如翻译、天气、智能家居',
+    '开发者辅助': '作为开发过程中的提效工具集成到编辑器或流水线中',
+    '其他场景': '',
+  };
+
+  const base = byCategory[category] || byCategory['其他实用项目'];
+  const scenarioTip = byScenario[scenario];
+  const extra = [];
+  if (scenarioTip) extra.push(scenarioTip);
+  if ((raw.stargazers_count || 0) > 1000) extra.push('社区活跃度高，问题容易获得解答');
+  if (raw.license?.spdx_id && raw.license.spdx_id !== 'NOASSERTION') {
+    extra.push(`采用 ${raw.license.spdx_id} 开源协议，可放心参考`);
+  }
+  // 场景提示优先放最前，保证和场景标签形成呼应
+  return [...(scenarioTip ? [scenarioTip] : []), ...base, ...extra.filter((e) => e !== scenarioTip)].slice(0, 4);
+}
+
+/* --------------------------- 杂项 ----------------------------- */
+
+function summarizeText(text, maxLen = 200) {
+  if (!text) return '';
+  const cleaned = String(text)
+    .replace(/\r/g, '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/<!--([\s\S]*?)-->/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (cleaned.length <= maxLen) return cleaned;
+  return cleaned.slice(0, maxLen) + '…';
+}
